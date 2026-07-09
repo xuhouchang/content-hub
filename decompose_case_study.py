@@ -327,7 +327,7 @@ def fetch_url_content(url: str, timeout: int = 15) -> Optional[str]:
 
 def search_with_anysearch(query: str, max_results: int = 10) -> list[dict]:
     """Search using AnySearch API."""
-    api_key = os.environ.get("ANYSEARCH_API_KEY", "as_sk_688a742d1ce960add6350d87f2adf1ac")
+    api_key = os.environ.get("ANYSEARCH_API_KEY", "")
     import subprocess, json
     cmd = [
         "curl", "-s", "-X", "POST", "https://api.anysearch.com/v1/search",

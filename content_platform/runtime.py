@@ -245,7 +245,10 @@ def _invoke_legacy_writer(script_path: Path, date_str: str, materials_file: str,
     ]
     if extra_args:
         cmd.extend(extra_args)
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    # Generous budget for the WRITE stage now that publishing is decoupled into
+    # a separate process. 900s covers writing + polish + image search + embed,
+    # while per-call LLM timeouts/retries are governed centrally in lib/llm.py.
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=900)
 
 
 def _write_job_log(job_dir: Path, filename: str, content: str) -> str:
@@ -313,7 +316,7 @@ def run_article_daily(
                 resolved_workspace / "write_article.py",
                 date_str=date_str,
                 materials_file=mat_file,
-                extra_args=["--publish"],
+                extra_args=None,
             )
             writer_all_stdouts.append(legacy_result.stdout or "")
             writer_all_exit_codes.append(legacy_result.returncode)

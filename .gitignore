@@ -54,7 +54,12 @@ test-output/
 pending_articles.json
 pending_articles.json.done
 crontab.backup.*
+# Publish queue (decoupled async publish stage)
+queue/
 todo.md
+
+# Local placeholder image (committed on purpose; fallback when image search fails)
+!assets/placeholder.jpg
 todos.md
 recruitment.md
 workspace_wechat_articles_recent_topics.json

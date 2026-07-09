@@ -16,8 +16,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 from image_search import search_pexels, download_image as pexels_download
 
-# Pexels API key from env
-PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "IupPtrTI2BG3nKYHvuSBDpZmL4bX48FvCY3HxV4BiN1BvgtQhRJM1to3")
+# Pexels API key from env (no longer hardcoded — the leaked key was rotated)
+PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
+PLACEHOLDER_PATH = Path(__file__).resolve().parent / "assets" / "placeholder.jpg"
 
 def main():
     article_path = Path(sys.argv[1])
@@ -70,7 +71,17 @@ def main():
                 continue
 
         if not found:
-            print(f"    ❌ Could not find image for {filename}")
+            # Fallback: write a local placeholder so the article keeps a valid
+            # file reference instead of a broken image.
+            if PLACEHOLDER_PATH.exists():
+                try:
+                    output_path.write_bytes(PLACEHOLDER_PATH.read_bytes())
+                    print(f"    ⚠️ Used local placeholder for {filename}")
+                    found = True
+                except OSError as e:
+                    print(f"    ⚠️ Placeholder copy failed: {e}")
+            if not found:
+                print(f"    ❌ Could not find image for {filename}")
 
     print(f"\nDone. Images in {images_dir}:")
     for f in sorted(images_dir.iterdir()):

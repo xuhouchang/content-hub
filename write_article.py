@@ -130,6 +130,13 @@ IMAGE_MATCHER_SCRIPT = COLLECTOR_DIR / "image_search.py"
 EMBED_IMAGES_SCRIPT = COLLECTOR_DIR / "embed_images.py"
 POLISH_SCRIPT = COLLECTOR_DIR / "polish_article.py"
 
+# ── Publish queue (decoupled async publish stage) ──
+# Writing and publishing are now two separate stages. A successful write
+# enqueues the article here; publish_worker.py (a separate process) consumes
+# the queue and creates the WeChat draft. See publish_worker.py.
+QUEUE_DIR = COLLECTOR_DIR / "queue"
+WORKER_PATH = COLLECTOR_DIR / "publish_worker.py"
+
 # ── System prompt for article writing ──
 
 WRITING_SYSTEM_PROMPT = """你是一位公众号撰稿人。素材给了你什么，你就写什么。
@@ -1032,6 +1039,67 @@ def write_article(
     return str(output_dir)
 
 
+def enqueue_for_publish(output_dir: str, digest: str = "") -> bool:
+    """Register a finished article for async publishing.
+
+    Appends one JSON line to queue/pending.jsonl. Idempotent per output_dir:
+    if the same article is already pending/done/failed, skip (no double publish).
+    """
+    try:
+        QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+        pending_file = QUEUE_DIR / "pending.jsonl"
+        done_file = QUEUE_DIR / "done.jsonl"
+        failed_file = QUEUE_DIR / "failed.jsonl"
+        for f in (pending_file, done_file, failed_file):
+            if f.exists():
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("output_dir") == str(output_dir):
+                        print(f"  ↺ Already queued/published ({f.name}); skip enqueue")
+                        return False
+        record = {
+            "output_dir": str(output_dir),
+            "article": "article.md",
+            "images_dir": "images",
+            "digest": digest,
+            "enqueued_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        with pending_file.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return True
+    except OSError as e:
+        print(f"  ⚠️ enqueue_for_publish failed: {e}")
+        return False
+
+
+def launch_publish_worker() -> bool:
+    """Fire-and-forget the publish worker in the background (detached).
+
+    Does NOT wait. The worker consumes the queue and creates WeChat drafts.
+    Returns True if it was launched.
+    """
+    if not WORKER_PATH.exists():
+        print(f"  ⚠️ publish_worker.py not found at {WORKER_PATH}; cannot auto-launch")
+        return False
+    try:
+        subprocess.Popen(
+            [sys.executable, str(WORKER_PATH), "--once"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except OSError as e:
+        print(f"  ⚠️ Failed to launch publish worker: {e}")
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Write article from collected materials")
     parser.add_argument("--date", type=str, default=None,
@@ -1046,8 +1114,8 @@ def main():
                         help="Path to JSON file with pre-loaded materials. "
                              "Each item: {\"url\": \"...\", \"content\": \"...\"}. "
                              "When set, skips all_urls.tsv collection.")
-    parser.add_argument("--publish", action="store_true",
-                        help="Publish to WeChat draft after writing")
+    parser.add_argument("--no-publish", action="store_true",
+                        help="Skip enqueueing the article for async WeChat publishing (local testing)")
     args = parser.parse_args()
 
     date_str = args.date or datetime.date.today().isoformat()
@@ -1065,39 +1133,27 @@ def main():
     output_dir = write_article(date_str, dry_run=args.dry_run, max_materials=args.max_materials, model=args.model, materials_override=materials_override)
 
     if output_dir:
-        # Auto-publish if requested
-        if args.publish and not args.dry_run:
-            images_dir = Path(output_dir) / "images"
-            article_path = Path(output_dir) / "article.md"
-            meta_path = Path(output_dir) / "meta.json"
+        # Decoupled, async publish: enqueue for the publish worker instead of
+        # blocking on wechat_publish.py here. The worker runs as a separate
+        # process (background-triggered now + a cron safety net) and creates
+        # the WeChat DRAFT only (no auto group-send — human review gate).
+        if not args.no_publish and not args.dry_run:
             digest = ""
+            meta_path = Path(output_dir) / "meta.json"
             if meta_path.exists():
-                import json as json_mod
-                meta = json_mod.loads(meta_path.read_text())
-                digest = meta.get("digest", "")
-
-            publish_script = COLLECTOR_DIR / "wechat_publish.py"
-            if publish_script.exists():
-                print(f"\n📤 Publishing to WeChat draft...")
-                cmd = [
-                    sys.executable, str(publish_script),
-                    "--article", str(article_path),
-                    "--images-dir", str(images_dir),
-                ]
-                if digest:
-                    cmd += ["--digest", digest]
                 try:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-                    for line in result.stdout.strip().split("\n"):
-                        print(f"  {line}")
-                    if result.returncode != 0:
-                        print(f"  ⚠️ Publish returned non-zero: {result.returncode}")
-                        if result.stderr:
-                            print(f"  stderr: {result.stderr[:300]}")
-                except subprocess.TimeoutExpired:
-                    print(f"  ⚠️ Publish timed out")
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    digest = meta.get("digest", "")
+                except (json.JSONDecodeError, OSError):
+                    pass
+            if enqueue_for_publish(output_dir, digest):
+                print(f"  📋 Queued for async publish (draft): {QUEUE_DIR / 'pending.jsonl'}")
+                if launch_publish_worker():
+                    print(f"  🚀 Publish worker launched in background")
+                else:
+                    print(f"  ⏳ Publish worker not auto-launched; will run on cron safety net")
             else:
-                print(f"  ⚠️ wechat_publish.py not found, skipping publish")
+                print(f"  ⚠️ Failed to enqueue for publish (see warnings above)")
 
         print(f"\n{'='*60}")
         print(f"✅ Article pipeline complete!")

@@ -48,6 +48,14 @@ MODEL_ALIASES = {
 # Use "openai/gpt-5.4" for actual writing
 DEFAULT_WRITING_MODEL = os.environ.get("WRITING_MODEL", "openai/gpt-5.4")
 
+# ── Per-call timeout / retry budget (governed centrally) ──
+# These were previously hardcoded (OpenRouter 180s/3 retries, DeepSeek
+# 300s/3 retries). A single retried call could run ~990s and blow the parent
+# pipeline budget. Now configurable and tightened; a `deadline` can further
+# short-circuit runaway retries.
+LLM_CALL_TIMEOUT = int(os.environ.get("LLM_CALL_TIMEOUT", "120"))
+LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "2"))
+
 
 def resolve_model(model_id: str) -> str:
     """Resolve model alias to OpenRouter model ID."""
@@ -59,7 +67,8 @@ def call_openrouter(
     model: str = None,
     temperature: float = 1.0,
     max_tokens: int = 4096,
-    max_retries: int = 3,
+    max_retries: int = None,
+    deadline: Optional[float] = None,
 ) -> Optional[str]:
     """Call any model through OpenRouter API.
 
@@ -75,6 +84,10 @@ def call_openrouter(
     """
     model = model or "deepseek/deepseek-chat"
     model = resolve_model(model)
+
+    if max_retries is None:
+        max_retries = LLM_MAX_RETRIES
+    timeout = LLM_CALL_TIMEOUT
 
     url = f"{OPENROUTER_BASE}/chat/completions"
     payload = {
@@ -100,8 +113,11 @@ def call_openrouter(
     )
 
     for attempt in range(max_retries):
+        if deadline is not None and time.time() > deadline:
+            print(f"  ⚠️ OpenRouter deadline exceeded; aborting retries")
+            return None
         try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             if content:
@@ -140,9 +156,14 @@ def call_deepseek_direct(
     messages: list,
     temperature: float = 1.0,
     max_tokens: int = 8192,
-    max_retries: int = 3,
+    max_retries: int = None,
+    deadline: Optional[float] = None,
 ) -> Optional[str]:
     """Call DeepSeek Chat directly via their API."""
+    if max_retries is None:
+        max_retries = LLM_MAX_RETRIES
+    timeout = LLM_CALL_TIMEOUT
+
     url = f"{DEEPSEEK_BASE}/chat/completions"
     payload = {
         "model": "deepseek-chat",
@@ -159,8 +180,11 @@ def call_deepseek_direct(
         },
     )
     for attempt in range(max_retries):
+        if deadline is not None and time.time() > deadline:
+            print(f"  ⚠️ DeepSeek deadline exceeded; aborting retries")
+            return None
         try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             if content:
@@ -199,6 +223,7 @@ def call_model(
     temperature: float = 1.0,
     max_tokens: int = 4096,
     model: str = None,
+    deadline: Optional[float] = None,
 ) -> Optional[str]:
     """Call the configured model.
 
@@ -221,15 +246,15 @@ def call_model(
     # ─────────────────────────────────────────
     if model and ("openai" in model or "gpt" in model or model == DEFAULT_WRITING_MODEL):
         # GPT 模型 → 走 OpenRouter
-        result = call_openrouter(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+        result = call_openrouter(messages, model=model, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
         if result:
             return result
         print("  OpenRouter failed, falling back to DeepSeek direct...")
-        return call_deepseek_direct(messages, temperature=temperature, max_tokens=max_tokens)
+        return call_deepseek_direct(messages, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
 
     # DeepSeek / 其他模型 → 走 DeepSeek 直连优先
-    result = call_deepseek_direct(messages, temperature=temperature, max_tokens=max_tokens)
+    result = call_deepseek_direct(messages, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
     if result:
         return result
     print("  DeepSeek direct failed, falling back to OpenRouter...")
-    return call_openrouter(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+    return call_openrouter(messages, model=model, temperature=temperature, max_tokens=max_tokens, deadline=deadline)

@@ -13,11 +13,14 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sys
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -100,8 +103,20 @@ class WeChatPublisher:
         else:
             req = Request(url, method=method)
 
-        with urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
+        try:
+            with urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+        except HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8")[:300]
+            except Exception:
+                pass
+            raise RuntimeError(f"WeChat HTTP {e.code}: {body}")
+        except (URLError, socket.timeout, TimeoutError) as e:
+            raise RuntimeError(f"WeChat network error: {e}")
+        except Exception as e:
+            raise RuntimeError(f"WeChat request failed: {e}")
 
         if "errcode" in result and result["errcode"] != 0:
             raise RuntimeError(f"WeChat API error {result['errcode']}: {result.get('errmsg', '')}")
@@ -142,18 +157,47 @@ class WeChatPublisher:
         print(f"🖼️ Image URL uploaded: {filename} → {img_url[:60]}...")
         return img_url
 
-    def upload_article_images_as_urls(self, images_dir: str) -> dict:
-        """Upload all images for inline use. Returns {filename: cdn_url} mapping."""
+    def upload_article_images_as_urls(self, images_dir: str, max_workers: int = 4) -> dict:
+        """Upload all inline images concurrently. Returns {filename: cdn_url}.
+
+        Fault tolerance: a single image failing (network error, size limit,
+        45009/40007, etc.) is skipped with a warning instead of aborting the
+        whole publish. Cover files (cover-1x1 / cover-wide) are excluded — they
+        are only used as the draft thumbnail, never as inline body images.
+        """
         if not os.path.isdir(images_dir):
             print(f"⚠️ Images directory not found: {images_dir}")
             return {}
 
-        mapping = {}
+        # Files that must NOT be inlined into the article body.
+        COVER_NAMES = {"cover-1x1.jpg", "cover-1x1.png", "cover-wide.jpg", "cover-wide.png"}
+
+        candidates = []
         for fname in sorted(os.listdir(images_dir)):
-            if fname.lower().endswith((".png", ".jpg", ".jpeg")):
-                fpath = os.path.join(images_dir, fname)
-                cdn_url = self.upload_image_as_url(fpath)
-                mapping[fname] = cdn_url
+            if fname.lower().endswith((".png", ".jpg", ".jpeg")) and fname not in COVER_NAMES:
+                candidates.append(fname)
+
+        if not candidates:
+            print("  ℹ️ No inline images to upload")
+            return {}
+
+        def _upload_one(fname: str):
+            fpath = os.path.join(images_dir, fname)
+            try:
+                return fname, self.upload_image_as_url(fpath)
+            except Exception as e:
+                print(f"  ⚠️ Skipping image {fname} (upload failed): {e}")
+                return fname, None
+
+        mapping = {}
+        # Concurrent upload — each call has its own 30s urlopen timeout inside
+        # _request, so a slow/blocked image can't stall the whole batch.
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_upload_one, f): f for f in candidates}
+            for fut in as_completed(futures):
+                fname, cdn_url = fut.result()
+                if cdn_url:
+                    mapping[fname] = cdn_url
         return mapping
 
     def upload_article_images(self, images_dir: str) -> dict:
@@ -492,9 +536,9 @@ def main():
 
     # Credentials: use constants defined at top of file
     if not WECHAT_APP_ID or not WECHAT_APP_SECRET:
-        print("⚠️  WECHAT_APP_ID / WECHAT_APP_SECRET not configured. Skipping publish.")
+        print("⚠️  WECHAT_APP_ID / WECHAT_APP_SECRET not configured. Cannot publish.")
         print("    Set them in scripts/.env or as environment variables.")
-        return
+        sys.exit(1)
 
     publisher = WeChatPublisher(WECHAT_APP_ID, WECHAT_APP_SECRET)
 
@@ -511,10 +555,10 @@ def main():
             sys.path.insert(0, os.path.dirname(__file__))
             from generate_cover import generate_cover_from_file as gen_cover
             cover_ok = gen_cover(args.article, args.images_dir)
-            if cover_ok[0] and cover_ok[1]:
+            if cover_ok and len(cover_ok) >= 2 and cover_ok[0] and cover_ok[1]:
                 print(f"  ✅ Cover images generated in {args.images_dir}")
             else:
-                print(f"  ⚠️ Cover generation partial, falling back to first article image")
+                print(f"  ⚠️ Cover generation partial, falling back to permanent cover")
         except ImportError as e:
             print(f"  ⚠️ generate_cover.py not available ({e}), using fallback")
         except Exception as e:
@@ -527,13 +571,23 @@ def main():
     url_map = {}
     if not args.no_cover:
         print("🖼️ Uploading images for article body...")
-        url_map = publisher.upload_article_images_as_urls(args.images_dir)
+        try:
+            url_map = publisher.upload_article_images_as_urls(args.images_dir)
+        except Exception as e:
+            print(f"  ⚠️ Inline image upload failed (continuing without them): {e}")
+            url_map = {}
 
     # Step 4: Replace local image paths with WeChat CDN URLs
+    replaced = 0
     for fname, cdn_url in url_map.items():
         for prefix in ["/images/", "images/", "./images/", "./images_root/", "./images/nathan-real/", "images/nathan-real/", "nathan-real/", ""]:
             src_path = prefix + fname
-            article["content"] = article["content"].replace(f'src="{src_path}"', f'src="{cdn_url}"')
+            new_content = article["content"].replace(f'src="{src_path}"', f'src="{cdn_url}"')
+            if new_content != article["content"]:
+                replaced += 1
+            article["content"] = new_content
+    if url_map and replaced == 0:
+        print("  ⚠️ No local image src matched the uploaded files; check embed/naming")
 
     # Step 5: Upload cover image as permanent material -> use as thumb_media_id
     # Prefer dynamically generated cover; fall back to first body image

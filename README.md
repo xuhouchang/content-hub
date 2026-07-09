@@ -205,31 +205,36 @@ run_all.sh
 
 ### 每日文章管线 (cron 06:00)
 
+> **架构说明（2026-07-09 重构）**：写作与发布已**解耦为两个异步阶段**。
+> `write_article.py` 只负责产出文章并入队（`queue/pending.jsonl`），随后在后台
+> 触发发布 worker；发布由独立的 `publish_worker.py` 进程消费队列完成（仅建草稿，
+> 不自动群发，保留人工审稿闸门）。两者互不阻塞，发布超时不会再拖垮写作。
+
 ```
 run_daily_article.sh
 ├── Phase 0: 增量打标
 │   └── tag_materials.py --max-batches 10
 │
-├── Phase 1: AI写作
-│   └── write_article.py --date today --model openai-codex/gpt-5.5
-│       ├── 选题判断 (LLM)
+├── Phase 1: AI写作 + 入队（Stage A：内容生成）
+│   └── write_article.py --date today
+│       ├── 选题判断 (LLM, 超时/重试见 lib/llm.py LLM_CALL_TIMEOUT)
 │       ├── 推理链构建
 │       ├── 正文写作
-│       └── 配图匹配下载
+│       ├── 配图匹配下载（image_search.py，无图时回退 assets/placeholder.jpg）
+│       ├── 图片嵌入 (embed_images.py)
+│       └── 入队 queue/pending.jsonl + 后台触发 publish_worker.py
 │
-├── Phase 2: 图片嵌入
-│   └── embed_images.py article.md images/
-│
-├── Phase 3: 发布到微信
-│   └── wechat_publish.py --article article.md --images-dir images/
-│       ├── 上传图片为微信CDN URL
-│       ├── 封面图生成&上传
-│       ├── Markdown → WeChat HTML转码
-│       └── 创建草稿 (draft/add)
-│
-└── Phase 4: 素材标记
-    └── 扫描文章URL，标记 all_urls.tsv 为 used
+└── Stage B：发布（独立进程 publish_worker.py，可后台触发或 cron 安全网）
+    └── publish_worker.py --once
+        └── wechat_publish.py --article article.md --images-dir images/   (无 --publish ⇒ 仅建草稿)
+            ├── 并发上传正文图片（单图失败跳过，不崩溃）
+            ├── 封面图生成&上传（不计入正文内联图）
+            ├── Markdown → WeChat HTML转码
+            └── 创建草稿 (draft/add)
 ```
+
+> cron 07:30 另有 `run_publish_worker.sh`（调用 `publish_worker.py --once`）作为安全网，
+> 即使后台触发进程异常退出也能补发。队列状态见 `queue/pending.jsonl` / `done.jsonl` / `failed.jsonl`。
 
 ### 每日案例拆解 (cron 10:00)
 
@@ -314,6 +319,9 @@ python3 write_article.py --dry-run
 
 # 每日公众号文章 — 每天06:00
 0 6 * * * cd /path/to/collector && bash run_daily_article.sh
+
+# 发布安全网（异步解耦）— 每天07:30 消费发布队列，补发后台触发未完成的草稿
+30 7 * * * cd /path/to/collector && bash run_publish_worker.sh
 
 # 每日案例拆解 — 每天10:00（工作日）
 0 10 * * 1-5 cd /path/to/collector && python3 decompose_case_study.py --external

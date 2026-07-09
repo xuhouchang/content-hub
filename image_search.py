@@ -18,10 +18,18 @@ from pathlib import Path
 
 
 # ── Config ──
-PEXELS_API_KEY = "IupPtrTI2BG3nKYHvuSBDpZmL4bX48FvCY3HxV4BiN1BvgtQhRJM1to3"
+# Keys are read from the environment (set in .env or the shell). They are NOT
+# hardcoded here anymore — the previously committed keys were leaked and have
+# been rotated. If a key is missing, that provider is skipped gracefully and we
+# fall back to a local placeholder instead of silently producing no image.
+PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
 PEXELS_URL = "https://api.pexels.com/v1/search"
-PIXABAY_API_KEY = "46539967-a28550dda0098c01b6a752b00"
+PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY", "")
 PIXABAY_URL = "https://pixabay.com/api/"
+
+# Local placeholder used when no remote image can be fetched (zero external
+# dependency). Generated asset under assets/; committed via force-add.
+PLACEHOLDER_PATH = Path(__file__).resolve().parent / "assets" / "placeholder.jpg"
 
 # Allowed image types
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -30,8 +38,29 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_FILE_SIZE = 5 * 1024 * 1024
 
 
+def _use_placeholder(output_path: Path, index: int) -> bool:
+    """Copy the local placeholder to image-<index>-pexels.jpg.
+
+    Returns True if a placeholder was written (so the caller can treat this as
+    a (degraded) success and the article still renders with a real file).
+    """
+    if not PLACEHOLDER_PATH.exists():
+        return False
+    target = output_path.parent / f"image-{index:03d}-pexels.jpg"
+    try:
+        target.write_bytes(PLACEHOLDER_PATH.read_bytes())
+        print(f"    ⚠️ No remote image; used local placeholder → {target.name}")
+        return True
+    except OSError as e:
+        print(f"    ⚠️ Placeholder copy failed: {e}")
+        return False
+
+
 def search_pexels(query: str, per_page: int = 5) -> list[dict]:
     """Search Pexels and return list of photo dicts."""
+    if not PEXELS_API_KEY:
+        print("    ⚠️ PEXELS_API_KEY not set; skipping Pexels")
+        return []
     params = urllib.parse.urlencode({"query": query, "per_page": per_page, "orientation": "landscape"})
     url = f"{PEXELS_URL}?{params}"
     req = urllib.request.Request(url, headers={
@@ -49,6 +78,9 @@ def search_pexels(query: str, per_page: int = 5) -> list[dict]:
 
 def search_pixabay(query: str, per_page: int = 5) -> list[dict]:
     """Search Pixabay and return list of image dicts."""
+    if not PIXABAY_API_KEY:
+        print("    ⚠️ PIXABAY_API_KEY not set; skipping Pixabay")
+        return []
     params = urllib.parse.urlencode({
         "key": PIXABAY_API_KEY,
         "q": query,
@@ -137,7 +169,12 @@ def main():
     photos = search(args.query)
 
     if not photos:
-        print(f"  ❌ No images found for: {args.query}")
+        print(f"  ⚠️ No remote images for: {args.query}")
+        # Fallback to a local placeholder so the article still has a valid file
+        # (no broken/empty image reference) instead of silently failing.
+        if _use_placeholder(Path(args.output_dir) / "image-001-pexels", args.index):
+            sys.exit(0)
+        print(f"  ❌ No placeholder available either; giving up")
         sys.exit(1)
 
     # Try to download the best one

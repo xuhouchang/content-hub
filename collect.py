@@ -255,7 +255,7 @@ def cmd_search(query: str, args) -> int:
     from lib import fetch_url
     
     url = "https://api.anysearch.com/v1/search"
-    api_key = os.environ.get("ANYSEARCH_API_KEY", "as_sk_688a742d1ce960add6350d87f2adf1ac")
+    api_key = os.environ.get("ANYSEARCH_API_KEY", "")
     
     payload = json.dumps({
         "query": query,
@@ -474,7 +474,7 @@ def _fetch_url_as_text(url: str, timeout: int = 15) -> Optional[str]:
 def _search_cases(query: str, max_results: int = 10) -> list[dict]:
     """Search for case studies using AnySearch."""
     url = "https://api.anysearch.com/v1/search"
-    api_key = os.environ.get("ANYSEARCH_API_KEY", "as_sk_688a742d1ce960add6350d87f2adf1ac")
+    api_key = os.environ.get("ANYSEARCH_API_KEY", "")
     
     payload = json.dumps({
         "query": query,
