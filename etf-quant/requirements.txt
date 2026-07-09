@@ -1,0 +1,18 @@
+# 港股 ETF 量化研究工作流 — 依赖
+
+# 核心数据处理
+pandas>=2.0
+numpy>=1.24
+pyyaml>=6.0
+
+# 数据获取
+yfinance>=0.2.0
+
+# 回测（MVP Phase 1 可选，Phase 2 必装）
+vectorbt>=0.3.0
+
+# 配置校验（可选，仅加载 config/settings.py 时）
+pydantic>=2.0
+
+# 日期处理
+python-dateutil>=2.8

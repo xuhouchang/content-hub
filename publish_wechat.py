@@ -274,23 +274,29 @@ def main():
     if not title:
         md_text = md_path.read_text(encoding='utf-8')
         m = re.search(r'^# (.+)', md_text, re.MULTILINE)
-        title = m.group(1).strip()[:12] if m else 'AI'
+        title = m.group(1).strip() if m else 'AI'
     
-    # Trim to limits
+    # WeChat API: title max 64 bytes (~21 Chinese chars in UTF-8).
+    # Soft target: keep under 25 chars for list display; truncate gracefully.
+    MAX_TITLE_CHARS = 25
+    MAX_DIGEST_CHARS = 20  # WeChat digest limit
     title = title.replace('：', '-').replace(':', '-')
-    if len(title) > 12:
-        title = title[:11] + '…'
-    if len(digest) > 18:
-        digest = digest[:17] + '…'
+    if len(title) > MAX_TITLE_CHARS:
+        title = title[:MAX_TITLE_CHARS - 1] + '…'
+    if len(digest) > MAX_DIGEST_CHARS:
+        digest = digest[:MAX_DIGEST_CHARS - 1] + '…'
     
     print("  Title: " + title + " (" + str(len(title)) + "c)")
     print("  Digest: " + digest + " (" + str(len(digest)) + "c)")
     
     # Check limits before calling API
-    if len(title) > 12:
-        print("ERROR: title too long: " + str(len(title)) + " chars")
-        sys.exit(1)
-    if len(digest) > 20:
+    title_bytes = len(title.encode('utf-8'))
+    if title_bytes > 64:
+        # Truncate by bytes, careful with multi-byte chars
+        while len(title.encode('utf-8')) > 64:
+            title = title[:-1]
+        print("  Title re-truncated to " + str(len(title)) + " chars (" + str(len(title.encode('utf-8'))) + " bytes)")
+    if len(digest) > MAX_DIGEST_CHARS:
         print("ERROR: digest too long: " + str(len(digest)) + " chars")
         sys.exit(1)
     

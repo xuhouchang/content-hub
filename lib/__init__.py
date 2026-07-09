@@ -335,6 +335,11 @@ def _fetch_via_jina(url: str, timeout: int = 30) -> str | None:
         return None
 
 
+def update_daily_summary(date_str: str, source_name: str, stats: dict) -> None:
+    """Stub: record daily summary stats."""
+    pass
+
+
 def fetch_url(url: str, timeout: int = 30, prefer: str = "direct") -> str | None:
     """Fetch a URL, returning text content.
 

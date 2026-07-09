@@ -20,7 +20,6 @@ echo "Content Platform Business Jobs — $DATE"
 echo "=========================================="
 
 "$PYTHON" "$SCRIPT_DIR/platform_cli.py" run article-daily --date "$DATE" --workspace-dir "$SCRIPT_DIR"
-"$PYTHON" "$SCRIPT_DIR/platform_cli.py" run case-daily --date "$DATE" --workspace-dir "$SCRIPT_DIR"
 
 echo "=========================================="
 echo "Business jobs complete"

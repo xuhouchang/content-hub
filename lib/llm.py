@@ -57,7 +57,7 @@ def resolve_model(model_id: str) -> str:
 def call_openrouter(
     messages: list,
     model: str = None,
-    temperature: float = 0.7,
+    temperature: float = 1.0,
     max_tokens: int = 4096,
     max_retries: int = 3,
 ) -> Optional[str]:
@@ -138,7 +138,7 @@ def call_openrouter(
 
 def call_deepseek_direct(
     messages: list,
-    temperature: float = 0.7,
+    temperature: float = 1.0,
     max_tokens: int = 8192,
     max_retries: int = 3,
 ) -> Optional[str]:
@@ -196,7 +196,7 @@ def call_deepseek_direct(
 
 def call_model(
     messages: list,
-    temperature: float = 0.7,
+    temperature: float = 1.0,
     max_tokens: int = 4096,
     model: str = None,
 ) -> Optional[str]:

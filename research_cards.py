@@ -35,8 +35,8 @@ except ImportError:
     )
 
 # ── paths ──
-COLLECTOR_DIR = Path(__file__).parent
-WORKSPACE_DIR = COLLECTOR_DIR.parent
+COLLECTOR_DIR = Path(__file__).parent  # .../workspace
+WORKSPACE_DIR = COLLECTOR_DIR           # workspace dir, not parent
 RESEARCH_DIR = WORKSPACE_DIR / "research" / "enterprise-ai-book"
 CARDS_DIR = RESEARCH_DIR / "cards"
 DAILY_DIR = RESEARCH_DIR / "daily"
@@ -182,7 +182,7 @@ URL: {item['url']}
             continue
 
         card_text = response.strip()
-        slug = slugify(item["url"][:40])
+        slug = slugify(item["url"][:80])  # use longer prefix to avoid collisions
 
         module_match = re.search(r"\*\*对应模块\*\*：(\d)", card_text)
         module = module_match.group(1) if module_match else "0"

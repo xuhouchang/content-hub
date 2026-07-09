@@ -1,4 +1,61 @@
-.worktrees/
-.venv/
+# Secrets & config
+.env
+.openclaw/
+.state/
+
+# Generated / cache / output
 __pycache__/
 *.pyc
+.venv/
+.worktrees/
+memory/
+logs/
+platform/datasets/
+collector/data/
+collector/logs/
+collector/.env
+
+# Article output dirs
+wechat-articles/
+blog-articles/
+medium-articles/
+article-output/
+report-output/
+report-archive/
+consulting-reports/
+reports/
+research/
+decks/
+downloads/
+clips/
+images/
+output/
+scripts/
+skills/
+publish-temp/
+wechat-drafts/
+test-images/
+test-output/
+
+# Files
+*.pdf
+*.mp4
+*.mp3
+*.mov
+*.mkv
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.ico
+
+# Config files
+pending_articles.json
+pending_articles.json.done
+crontab.backup.*
+todo.md
+todos.md
+recruitment.md
+workspace_wechat_articles_recent_topics.json
+IG_PUBLISHER_*.json

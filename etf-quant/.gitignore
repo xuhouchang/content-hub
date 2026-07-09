@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 数据缓存
+data_cache/
+
+# 日志
+logs/
+
+# 日报输出（重新运行即可生成）
+reports/output/
+
+# 环境/IDE
+.env
+.venv
+venv/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

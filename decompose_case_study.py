@@ -179,6 +179,13 @@ CASE_STUDY_PROMPT = """你是一个企业AI落地分析师。你的任务是深�
 - **深读**：想要细节的人能找到具体数字、决策逻辑、实施过程
 - **带走**：读完能直接回答"我能不能参考这个？我第一件事该做什么？"
 
+## 硬性规则（必须严格遵守）
+
+1. **正文配图**：在合适位置（每500-800字）插入配图标记 `![](./images/image-NNN-keyword.jpg)`（NNN为三位数字序号，keyword为英文关键词）。配图应与内容相关——架构图、流程图、数据图、照片等。一篇文章**至少插入3张配图标记**。注意：仅仅插入标记即可，图片文件由后续步骤自动搜索嵌入。示例：`![](./images/image-001-kyc-agent-workflow.jpg)`
+2. **排版要求**：关键数据用**加粗**，对比用列表，引用用 `>` blockquote。不要整段都是文字，每300字至少有一个排版变化（加粗/列表/引用/分隔线）。
+3. 不要使用「这意味着」「这告诉我们」「这说明」等总结型句子。
+4. 不要使用「不是……而是……」话术结构。
+
 每一篇必须包含以下完整信息，缺一不可（素材不够时从备选区域获取补充）：
 
 ## 每篇案例必须涵盖的信息点
@@ -265,7 +272,7 @@ CASE_STUDY_PROMPT = """你是一个企业AI落地分析师。你的任务是深�
 ```markdown
 # 标题：公司/行业 + 核心判断
 
-（正文，纯 Markdown）
+（正文，纯 Markdown，包含配图标记）
 ```
 
 摘要放在文章第一行单独输出：
@@ -382,28 +389,8 @@ def discover_case_external(search_query: Optional[str] = None) -> Optional[dict]
                 "search_query": search_query,
             }
     
-    # Strategy 2: Try fetching full content from known collection sites
-    collection_sites = [
-        ("case-studies.ai", "https://case-studies.ai/"),
-        ("theapplied.co", "https://theapplied.co/use-cases"),
-        ("ninetwothree.co", "https://www.ninetwothree.co/blog/ai-adoption-case-studies"),
-        ("retool.com", "https://retool.com/blog"),
-        ("langchain.com", "https://blog.langchain.dev/"),
-    ]
-    
-    for name, url in collection_sites:
-        if url in used_urls:
-            continue
-        print(f"  📡 Checking {name}...")
-        content = fetch_url_content(url, timeout=10)
-        if content and len(content) > 500:
-            print(f"  ✓ Got content from {name} ({len(content)} chars)")
-            return {
-                "url": url,
-                "title": f"Case Study from {name}",
-                "content": content[:10000],
-                "source": name,
-            }
+    # Strategy 2: Skip collection site root pages — they don't contain a single case
+    # and cause repeat issues. Rely on AnySearch queries for specific case URLs.
     
     # Strategy 3: Try pre-configured search queries
     for q in EXTERNAL_SEARCH_QUERIES:
@@ -428,19 +415,199 @@ def discover_case_external(search_query: Optional[str] = None) -> Optional[dict]
     return None
 
 
+def _is_generic_domain(url: str) -> bool:
+    """Check if URL is just a domain (no specific path to a case)."""
+    generic_domains = [
+        "case-studies.ai", "theapplied.co", "ninetwothree.co",
+        "ninetwothree.com", "intercom.com", "retool.com",
+        "langchain.dev", "blog.langchain.dev", "moveworks.com",
+        "aws.amazon.com", "cloud.google.com",
+    ]
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        path = parsed.path.rstrip("/")
+        if not path or path == "":
+            return any(g in domain for g in generic_domains)
+    except Exception:
+        pass
+    return False
+
+
+def _has_url_been_used_as_source(url: str) -> bool:
+    """Check if a URL has been used in any existing case study's materials.json."""
+    output_dir = OUTPUT_DIR
+    if not output_dir.exists():
+        return False
+    import json
+    for d in sorted(output_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        mat_path = d / "materials.json"
+        if mat_path.exists():
+            try:
+                mats = json.loads(mat_path.read_text(encoding="utf-8"))
+                if isinstance(mats, list):
+                    for m in mats:
+                        u = m.get("url", "").rstrip("/")
+                        if u == url.rstrip("/"):
+                            return True
+                elif isinstance(mats, dict):
+                    u = mats.get("url", "").rstrip("/")
+                    if u == url.rstrip("/"):
+                        return True
+            except Exception:
+                continue
+    return False
+
+
 def _load_used_external_urls() -> set:
     """Load set of previously used external case URLs."""
     used = set()
     if EXTERNAL_USED_FILE.exists():
         for line in EXTERNAL_USED_FILE.read_text().strip().split("\n"):
             url = line.strip()
-            if url:
+            # Skip generic domain entries — only track specific case URLs
+            if url and not _is_generic_domain(url):
                 used.add(url)
     return used
 
 
+def _publish_to_wechat_draft(out_dir: str, date_str: str) -> bool:
+    """Publish case study article as a WeChat draft."""
+    import requests
+    out_path = Path(out_dir)
+    md_path = out_path / "article.md"
+    img_dir = out_path / "images"
+    if not md_path.exists():
+        print(f"  ❌ Article not found for publishing: {md_path}")
+        return False
+
+    md_text = md_path.read_text(encoding="utf-8")
+
+    # Load meta.json for title/digest
+    meta_path = out_path / "meta.json"
+    meta_data = {}
+    if meta_path.exists():
+        try:
+            meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    # Title: prefer meta.json title, then first non-H1 line of body
+    title = meta_data.get("title", "")
+    if not title:
+        first_line = md_text.split("\n")[0].strip().lstrip("# ").strip()
+        title = first_line[:60] if first_line else f"案例拆解 {date_str}"
+
+    # Digest: prefer meta.json, then extract_digest, then first paragraph
+    digest = meta_data.get("digest", "")
+    if not digest:
+        digest = extract_digest(md_text)
+    if not digest:
+        first_para = md_text.split("\n\n")[1] if len(md_text.split("\n\n")) > 1 else ""
+        digest = first_para.strip().replace("\n", " ")[:60]
+
+    # Import WeChat publisher with purple theme
+    sys.path.insert(0, str(Path(__file__).parent))
+    from wechat_publish import WeChatPublisher
+
+    # Load env
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        with open(env_path) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and "=" in _line and not _line.startswith("#"):
+                    _k, _v = _line.split("=", 1)
+                    _v = _v.strip().strip("\"'").strip()
+                    if _v and not os.environ.get(_k.strip()):
+                        os.environ[_k.strip()] = _v
+
+    app_id = os.environ.get("WECHAT_APP_ID", "")
+    app_secret = os.environ.get("WECHAT_APP_SECRET", "")
+    if not app_id or not app_secret:
+        print("  ❌ WeChat credentials not found")
+        return False
+
+    print(f"\n📤 Publishing case study to WeChat draft...")
+    publisher = WeChatPublisher(app_id, app_secret)
+
+    # Upload article images and replace in markdown with WeChat CDN URLs
+    article_md = md_text
+    uploads = publisher.upload_article_images_as_urls(str(img_dir))
+
+    def _replace_img(m):
+        basename = os.path.basename(m.group(2))
+        url = uploads.get(basename)
+        if url:
+            return f'![{m.group(1)}]({url})'
+        return m.group(0)
+    article_md = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', _replace_img, article_md)
+
+    # Strip backticks wrapping ![]() image lines (prevent them from being <code>)
+    article_md = re.sub(r'^`(!\[[^\]]*\]\([^)]+\))`\s*$', r'\1', article_md, flags=re.MULTILINE)
+
+    # Convert with purple theme (handles tables, headings, lists)
+    html_content = publisher._markdown_to_wechat_html(article_md)
+
+    # Truncate title to WeChat limits (keep under 85 bytes for CJK titles)
+    while len(title.encode('utf-8')) > 85:
+        title = title[:-1]
+
+    # Upload cover as thumb
+    cover_path = None
+    for candidate in ["cover-1x1.jpg", "cover-wide.jpg"]:
+        p = img_dir / candidate
+        if p.exists():
+            cover_path = p
+            break
+    if not cover_path:
+        image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
+        imgs = [p for p in img_dir.iterdir() if p.suffix.lower() in image_exts]
+        cover_path = imgs[0] if imgs else None
+
+    thumb_media_id = ""
+    if cover_path:
+        try:
+            from PIL import Image as PILImage
+            thumb_path = img_dir / "cover_thumb.jpg"
+            im = PILImage.open(str(cover_path)).convert('RGB')
+            sz = min(im.size)
+            im = im.crop(((im.width - sz)//2, (im.height - sz)//2, (im.width + sz)//2, (im.height + sz)//2))
+            im = im.resize((300, 300), PILImage.LANCZOS)
+            im.save(thumb_path, 'JPEG', quality=85)
+            thumb_media_id = publisher.upload_image(str(thumb_path))
+            if thumb_media_id:
+                print(f"  Cover thumb uploaded: {thumb_media_id[:20]}...")
+            else:
+                print(f"  ⚠️ Cover upload returned empty media_id")
+        except Exception as e:
+            print(f"  ⚠️ Cover thumb upload failed ({e})")
+    else:
+        print("  ⚠️ No cover image found")
+
+    # Create draft via publisher (handles encoding correctly)
+    try:
+        media_id = publisher.create_draft({
+            'title': title,
+            'digest': digest,
+            'content': html_content,
+        }, thumb_media_id)
+        print(f'  ✅ Draft created: {media_id}')
+        return True
+    except Exception as e:
+        print(f'  ❌ Draft creation failed: {e}')
+        return False
+
+
 def _mark_external_url_used(url: str):
-    """Mark a URL as used to avoid repeats."""
+    """Mark a URL as used to avoid repeats.
+    Skips generic domain entries (e.g. "case-studies.ai" without a specific path)."""
+    if _is_generic_domain(url):
+        print(f"  ⏭️ Skipping generic domain: {url}")
+        return
     EXTERNAL_USED_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(EXTERNAL_USED_FILE, "a") as f:
         f.write(url.strip().rstrip("/") + "\n")
@@ -601,7 +768,7 @@ def write_case(
 素材内容：
 {context}
 
-请严格按照上述要求输出完整 Markdown 文章。以 # 标题开头。摘要行放在第一行。"""
+请严格按照上述要求输出完整 Markdown 文章。摘要行放在第一行。正文不要以 # 标题开头，直接从开头段开始写。"""
 
     messages = [
         {"role": "system", "content": CASE_STUDY_PROMPT},
@@ -618,15 +785,21 @@ def write_case(
     digest = extract_digest(response)
     article_text = strip_digest(response)
 
+    # Extract title BEFORE stripping so we still get a good directory name
+    title_match = re.search(r'^#\s+(.+)$', article_text, re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else (digest or "case-study")
+
+    # Strip the H1 title line — WeChat draft already shows the title separately,
+    # so having # Title in the body causes title duplication in published articles.
+    article_text = re.sub(r'^#\s+.+\n?', '', article_text, count=1).lstrip()
+
     if len(article_text) < 300:
         print(f"  ❌ Article too short ({len(article_text)} chars), likely failed")
         return None
 
     print(f"  ✓ Article generated: {len(article_text)} chars")
 
-    # Determine output directory
-    title_match = re.search(r'^#\s+(.+)$', article_text, re.MULTILINE)
-    title = title_match.group(1).strip() if title_match else (digest or "case-study")
+    # Determine output directory (use extracted title, fallback to digest)
     title_slug = re.sub(r'[^\w\u4e00-\u9fff-]', '-', title)[:60].strip('-').lower()
     output_dir = OUTPUT_DIR / f"{date_str}-{title_slug}"
     images_dir = output_dir / "images"
@@ -644,9 +817,9 @@ def write_case(
     article_path.write_text(article_text, encoding="utf-8")
     print(f"  ✓ Article saved: {article_path}")
 
-    # Save digest
+    # Save title + digest to meta.json
     if digest:
-        meta = {"digest": digest, "date": date_str, "materials_count": len(materials)}
+        meta = {"title": title, "digest": digest, "date": date_str, "materials_count": len(materials)}
         meta["materials"] = [{"url": m.get("url", ""), "title": m.get("title", "")} for m in materials]
         meta_path = output_dir / "meta.json"
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -722,6 +895,32 @@ def post_process(output_dir: str) -> bool:
     # Count image placeholders
     image_count = len(re.findall(r'!\[.*?\]\(.*?\)', article_text))
     if image_count == 0:
+        print("  ⚠️ No placeholders found, auto-injecting 3 image placeholders with context-aware queries...")
+        paragraphs = article_text.split("\n\n")
+        new_article = []
+        char_count = 0
+        img_idx = 1
+        for para in paragraphs:
+            new_article.append(para)
+            char_count += len(para)
+            if char_count > 500 and img_idx <= 3:
+                # Extract meaningful keywords from surrounding context for better Pexels search
+                context_words = re.findall(r'[\u4e00-\u9fff]{2,6}', para[:150])
+                stop_words = {"这个", "那个", "什么", "怎么", "可以", "没有", "一个", "一些",
+                             "这些", "那些", "一下", "我们", "他们", "你们", "问题", "就是",
+                             "不是", "还是", "已经", "可能", "所以", "因为", "如果",
+                             "但是", "而且"}
+                keywords = [w for w in context_words if w not in stop_words][-3:]
+                desc = keywords[-1] if keywords else f"示意图{img_idx}"
+                new_article.append(f"\n![{desc}](./images/image-{img_idx:03d}-placeholder.jpeg)\n")
+                img_idx += 1
+                char_count = 0
+        article_text = "\n\n".join(new_article)
+        article_path.write_text(article_text, encoding="utf-8")
+        image_count = img_idx - 1
+        print(f"  ✓ Injected {image_count} context-aware placeholders into article")
+
+    if image_count == 0:
         print("  ⚠️ No images to search")
         return False
 
@@ -747,8 +946,8 @@ def post_process(output_dir: str) -> bool:
         print(f"\n  [{idx}/{image_count}] Searching: {query}")
         try:
             result = subprocess.run(
-                [sys.executable, str(image_search_py), "--query", query,
-                 "--output-dir", str(images_dir), "--max-images", "1"],
+                [sys.executable, str(image_search_py), query,
+                 str(images_dir), "--index", str(idx)],
                 capture_output=True, text=True, timeout=30,
                 env={**os.environ, "PEXELS_API_KEY": os.environ.get("PEXELS_API_KEY", "")}
             )
@@ -761,12 +960,47 @@ def post_process(output_dir: str) -> bool:
             print(f"    ⚠️ Image {idx} error: {e}")
             success = False
 
+    # If all image searches failed, generate placeholder gradient images
+    # so the article isn't entirely text-only
+    images_dir_path = Path(images_dir)
+    existing_images = list(images_dir_path.glob("image-*"))
+    if not existing_images and queries:
+        print(f"  ⚠️ No images downloaded from search. Generating placeholder images...")
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            for idx in sorted(queries.keys()):
+                query_text = queries[idx][:30]
+                fname = f"image-{idx:03d}-placeholder.jpeg"
+                fpath = images_dir_path / fname
+                img = Image.new('RGB', (800, 450), color=(35, 88, 160))
+                draw = ImageDraw.Draw(img)
+                # Try to find a font
+                font = None
+                for fp in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                           "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                           "/System/Library/Fonts/Helvetica.ttc"]:
+                    if os.path.exists(fp):
+                        font = ImageFont.truetype(fp, 20)
+                        break
+                if font:
+                    bbox = draw.textbbox((0, 0), query_text, font=font)
+                    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                    draw.text(((800 - tw) // 2, (450 - th) // 2), query_text,
+                              fill=(200, 220, 255), font=font)
+                img.save(fpath, "JPEG", quality=70)
+                print(f"    ✓ Generated placeholder: {fname}")
+        except ImportError:
+            print(f"    ⚠️ PIL not available, skipping placeholder generation")
+        except Exception as e:
+            print(f"    ⚠️ Placeholder generation error: {e}")
+
     # Embed images into article
     if embed_images_py.exists():
         print(f"\n🔗 Embedding images into article...")
         try:
             subprocess.run(
-                [sys.executable, str(embed_images_py), "--article-dir", str(out_path)],
+                [sys.executable, str(embed_images_py),
+                 str(article_path), str(images_dir)],
                 capture_output=True, text=True, timeout=30,
             )
             print(f"    ✓ Images embedded")
@@ -863,9 +1097,10 @@ def main():
         print("  ❌ Case writing failed")
         return 1
 
-    # ── Steps 4-6: Post-process ──
+    # ── Steps 4-6: Post-process + Publish ──
     if not args.dry_run:
         post_process(out_dir)
+        _publish_to_wechat_draft(out_dir, date_str)
 
     print(f"\n{'=' * 60}")
     print("✅ Case study complete!")

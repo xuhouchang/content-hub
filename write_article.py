@@ -132,66 +132,28 @@ POLISH_SCRIPT = COLLECTOR_DIR / "polish_article.py"
 
 # ── System prompt for article writing ──
 
-WRITING_SYSTEM_PROMPT = """你不是报告摘要工具，不是资料翻译器，不是热点评论员。你借一份外部材料，提出一个读者猜不到的独立判断。
+WRITING_SYSTEM_PROMPT = """你是一位公众号撰稿人。素材给了你什么，你就写什么。
 
 ## 绝对禁区
 
-严禁讨论以下任何话题：
-- 中国的时事政治、政策、政府、监管或审查
-- 中国的领导人或政治体制
-- 中国与其他国家的政治或军事关系
-- 人权、言论自由、审查制度
-- 中国政府的任何政策评价
-- 台湾、西藏、新疆、香港的政治议题
-- 中国的电子战、网络安全、军事策略
+严禁讨论中国的时事政治、政策、政府、监管或审查等话题。就当没看到。
 
-如果素材中涉及以上话题，请忽略相关段落。不要反驳、不要评价、不要讨论、不要提及。就当没看到。
+你的文章不能是政治评论。
 
-你的文章定位是**企业AI落地和AI研究发现**，不是政治评论。
+读者看完后至少会说一句"有意思"，而不是"就这？"。
 
-你的文章必须满足一个条件：读者看完后会说"原来是这样"而不是"嗯，有道理"。
+## 写作方向
 
-你的文章必须满足一个条件：读者看完后会说"原来是这样"而不是"嗯，有道理"。
+素材是什么就写什么。不强行塞一个"反常识结论"。
 
-## 两条选题路径
+- 如果素材是一篇论文，就把它的方法、数据、结论写清楚
+- 如果素材是一个案例，就把前因后果、得失讲透
+- 如果素材是一个趋势判断，就把传导链条说明白
+- 如果素材是某个人的观点，就把他的核心论证展开
 
-每次写作时，根据素材内容选择最适合的路径：
+不必每篇追求"颠覆认知"。有些好文章就是"把这个事情说明白了"。
 
-### 路径 A：企业落地导向
-目标读者：企业管理者和决策者。
-关注点：AI 对企业流程、组织、决策、人才的实际影响。
-写作目标见下文「写作目标」部分。
-
-✅ 素材类型（至少一个）：
-- 企业对AI系统性高估/低估？项目失败根因？预期管理？管理者认知盲区？
-- AI嵌入业务流真实案例和效果数据？流程重构的组织阻力？行业差异？
-- 组织结构/团队规模/协作方式变化？人才定义和能力模型重写？绩效薪酬体系适应？超级个体/小队案例及限制条件？
-- 企业AI基础设施的组织决策？数据治理从合规变竞争优势？Shadow AI 治理经验？
-- AI如何改变决策流程和质量？商业情报+AI的新竞争模式？决策智能化的组织阻力？
-
-### 路径 B：有意思的 AI 研究发现
-目标读者：对 AI 感兴趣的普通读者（不限于企业管理者）。
-这类文章的独特之处在于——它给你一个你猜不到的结论，或者用数据揭示了一个没人注意到的现象。
-你不能教别人怎么用 AI 工具，展示的是"没想到 AI 是这样的"。
-
-✅ 素材类型（至少一个）：
-- AI 内部工作机制的反常识发现（如模型没感情但内部有情绪表征、模型可能"假装"具备某些能力）
-- 出人意料的实验结果（某种操作的效果远好于/差于预期）
-- 谁真正从 AI 受益的数据（不是个人使用体验，而是有数据支撑的使用群体分析）
-- 关于 AI 能力的意外揭示（模型能做什么、不能做什么，和直觉不一致的发现）
-- AI 可解释性研究的通俗解读（不用技术术语，告诉读者"我们看到模型内部了，发现了什么"）
-- 对比实验的意外结果（加了 expert persona 反而没用这种事）
-- AI 使用行为的真实数据（多少人真正在用、怎么用、效果差异）
-
-### 两条路径的共同排除项
-❌ 跳过：
-- 新AI模型/产品/功能发布（除非有企业落地场景+组织影响分析+路径A）
-- Agent框架/工具的技术评测
-- 模型评测、benchmark 数据（除非揭示反常识结论+路径B）
-- 纯技术论文、算法创新（除非有解读价值+路径B）
-- 个人开发者体验（"我用Cursor写代码"类）
-- 教程、指南、工具使用教学
-- AI行业投融资新闻
+排除项：模型/产品发布动态、技术教程、工具评测、投融资新闻。
 
 ## 写作目标（两条路径通用）
 1. 让读者理解一个正在发生的变化
@@ -225,6 +187,8 @@ WRITING_SYSTEM_PROMPT = """你不是报告摘要工具，不是资料翻译器�
 - 不要按原报告目录写
 - 不要大段复述材料
 - 不要堆概念
+- 不要使用「不是……而是……」这种话术结构。反例：❌"企业的问题不是技术不足，而是组织没跟上"→ ✅"组织跟不上是真正的瓶颈"
+- 禁止段落/章节结尾使用「这意味着什么」「这说明」「这告诉我们」等总结型收束。结尾留一个可复述的判断，不额外总结。
 - 不要使用咨询腔套话："赋能""抓手""闭环生态""新范式"
 - 不要把所有问题都归因于"企业应该拥抱 AI"（路径A专用）
 - 多写机制、传导、边界、代价
@@ -266,45 +230,36 @@ WRITING_SYSTEM_PROMPT = """你不是报告摘要工具，不是资料翻译器�
 
 ## 中文写作规范
 
-- 全文使用中文标点符号：句号用。，逗号用，，引号用「」和『』（嵌套时外「内『』），括号用（），书名号用《》，破折号用——，省略号用……
-- 禁止使用英文双引号""和英文单引号''
-- 英文术语、缩写保留原文不翻译，但不需要加引号
+- 全文使用中文标点符号
+- 英文术语、缩写保留原文不翻译
+- 禁止章节标题使用内部框架术语
+- 禁止在文章正文中出现"ABCD级证据""推理链标记"等内部流程残留
 
-## 文章定位
-路径A的服务对象是组织（企业/团队/管理方），路径B的服务对象是「好奇的普通人」。
-
-**严重警告：输出中不得出现以下内容——**
-- "反常识信号""三层萃取""候选判断""推理链设计""情报扫描""边界检查""正文写作"等框架术语作为章节标题
-- "路径A推断""正文写作""工作流程"等内部指引的残留文字
-- 任何"ABCD级证据""推理链"分级标记
-- 任何看起来像作者在跟读者解释"我的写作方法"的内容
-
-你输出的文章的章节标题，应该是面向读者的、有信息量的问题或判断，比如"为什么你买的 AI 工具没用上？""任务审计被严重低估"，而不是你的写作框架名称。
+## 风格指引
+- 不用"赋能""抓手""闭环""新范式"等套话
+- 不用"这意味着什么""这说明""这告诉我们"总结收束
+- 不用"不是……而是……"话术结构
+- 段落开头可以直给判断，也可以先叙事再出结论——看素材最适合什么节奏
+- 标题要有信息量，不能只是话题标签。可以有"为什么""怎么办""真相是"，也可以用陈述句直说结论
 
 ## 输出格式
 
-**输出必须只有最终的完整文章，不包含任何推理过程、思考步骤、框架术语、内部标记或"正文写作"等步骤标题。** 
-
-你的输出 = 一篇可以直接给读者看的公众号文章。不是草稿，不是大纲，不是思考记录。
+输出只有最终的完整文章，不包含任何推理过程、思考步骤、框架术语、内部标记。
 
 格式：
 ```
-# 标题（符合下方标题规则）
+# 标题
 
-摘要: 一句话金句，最多50字
+摘要: 一句话，最多50字
 
 文章正文...(含 `![描述](./images/image-NNN-xxx.jpeg)` 图片占位符)
 
 ```
 
-章节标题必须是面向读者的自然标题，不能是内部框架名称。
 输出语言：中文（中国大陆，简体）。
-文章长度：路径A 2500-4000字，路径B 2000-3500字。
+文章长度：2000-3500字。
 
-## 摘要要求
-在文章正式开始前，单独一行输出文章的摘要（digest）—— 一句金句。
-格式：`摘要: 这句话是对文章核心判断的一个简短总结，最多50字，要像金句一样好记。`
-不要以"本文"或"这篇文章"开头。用陈述句，直接说结论。
+摘要用陈述句直接说结论，不要以"本文"或"这篇文章"开头。
 """
 
 
@@ -384,6 +339,7 @@ def _log_article_topic(
     digest: str,
     output_dir: Path,
     source_urls: list[str],
+    cluster_ids: list[str] | None = None,
     mark_source_urls: bool = True,
 ):
     """Log article title+digest to a JSON file for diversity tracking.
@@ -403,6 +359,7 @@ def _log_article_topic(
             "date": datetime.date.today().isoformat(),
             "output_dir": str(output_dir),
             "source_urls": source_urls[:5],
+            "cluster_ids": cluster_ids or [],
         })
         # Keep only last 30 entries
         entries = entries[-30:]
@@ -630,6 +587,13 @@ def write_article(
     sampled = sample_materials(enriched, max_materials)
     print(f"  Selected {len(sampled)} materials")
 
+    # ⛔ STRONG GUARD: If no materials were sampled after all filtering, abort.
+    # Prevents articles from being hallucinated without any real source content.
+    if not sampled:
+        print("  ❌ No materials survived filtering. Aborting: cannot write article")
+        print("     without at least one source material to draw from.")
+        return None
+
     # === STRONG GUARD: Verify all sampled materials have substantive content ===
     MIN_CONTENT_CHARS = 500
     poor_materials = []
@@ -814,7 +778,7 @@ def write_article(
         {"role": "user", "content": user_prompt},
     ]
 
-    response = call_model(messages, temperature=0.7, max_tokens=8192, model=model)
+    response = call_model(messages, temperature=1.0, max_tokens=8192, model=model)
     if not response:
         print(f"  ❌ Model returned no response")
         return None
@@ -894,11 +858,18 @@ def write_article(
         print(f"  ⚠️ No digest extracted (LLM didn't output '摘要:' line)")
 
     # ── Log article topic for diversity tracking ──
+    # Collect cluster_ids from sampled materials for dedup tracking
+    sampled_cluster_ids = list({
+        s.get("dedup", {}).get("cluster_id", "")
+        for s in sampled
+        if s.get("dedup", {}).get("cluster_id")
+    })
     _log_article_topic(
         title,
         digest,
         output_dir,
         [s["url"] for s in sampled],
+        cluster_ids=sampled_cluster_ids,
         mark_source_urls=not bool(materials_override),
     )
 
@@ -926,6 +897,69 @@ def write_article(
 
     # Re-read article after polish
     article = article_path.read_text(encoding="utf-8")
+
+    # ── Hard post-processing: clean AI-typical phrasing ──
+    print("\n🔧 Running hard post-processing on article text...")
+    from lib.llm import call_model as _call_llm
+    
+    def _hard_clean_article(text: str) -> str:
+        """One-pass hard regex post-processing to scrub AI-typical phrasing.
+        Applied AFTER LLM polish, as a safety net.
+        """
+        changes = []
+        original = text
+
+        # 1. Replace "不是……而是……" pattern
+        #    "不能X，而是Y" + similar structures
+        count_before = text.count("不是")
+        def _replace_not_but(m):
+            prefix = m.group(1)
+            after = m.group(2).strip()
+            if prefix.rstrip().endswith('这') and not after.startswith('是'):
+                return prefix.rstrip() + '是' + after
+            if prefix.rstrip() and not prefix.rstrip()[-1] in '这那的' and not after.startswith('是'):
+                return prefix.rstrip() + '是' + after
+            return prefix.rstrip() + after
+        text = re.sub(
+            r'(.+?)不是[^，。]{2,60}?(?:，|,)\s*而(?:不是)?(.+)',
+            _replace_not_but,
+            text
+        )
+        count_after = text.count("不是")
+        if count_before > count_after:
+            changes.append(f"cleaned {count_before - count_after} '不是…而是…' instance(s)")
+
+        # 2. Kill section-ending summary headers like "## 这意味着什么"
+        text = re.sub(
+            r'^#{1,3}\s*这意味着什么[：:]*\s*$\n?',
+            '',
+            text,
+            flags=re.MULTILINE
+        )
+
+        # 3. Kill standalone summary-sentence lines
+        text = re.sub(
+            r'^(?:这意味着|这告诉我们|这说明|这里的启示是|这背后的启示)\s[^。\n]*[。]?$\n?',
+            '',
+            text,
+            flags=re.MULTILINE
+        )
+
+        # 4. Strip orphan blank lines left after removals
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        text = text.strip() + '\n'
+
+        changed = text != original
+        if changed:
+            print(f"  \U0001f527 Post-process: {'; '.join(changes) if changes else 'text modified'}")
+        else:
+            print(f"  \u2705 Post-process: no changes needed")
+        return text
+
+    article = _hard_clean_article(article)
+
+    # Write cleaned article back
+    article_path.write_text(article, encoding="utf-8")
 
     # Step 7: Match images (after text is finalized)
     print("\n7️⃣  Matching images...")
@@ -1053,7 +1087,7 @@ def main():
                 if digest:
                     cmd += ["--digest", digest]
                 try:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
                     for line in result.stdout.strip().split("\n"):
                         print(f"  {line}")
                     if result.returncode != 0:
