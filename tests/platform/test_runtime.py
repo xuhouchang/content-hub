@@ -166,7 +166,7 @@ def test_article_daily_uses_collect_dataset_when_materials_not_provided(tmp_path
     monkeypatch.setattr(
         runtime_module.subprocess,
         "run",
-        lambda cmd, capture_output, text, timeout: subprocess.CompletedProcess(
+        lambda cmd, capture_output, text, timeout, **kwargs: subprocess.CompletedProcess(
             cmd, 0, stdout="ok", stderr=""
         ),
     )
@@ -196,7 +196,7 @@ def test_case_daily_uses_collect_dataset_when_materials_not_provided(tmp_path: P
     monkeypatch.setattr(
         runtime_module.subprocess,
         "run",
-        lambda cmd, capture_output, text, timeout: subprocess.CompletedProcess(
+        lambda cmd, capture_output, text, timeout, **kwargs: subprocess.CompletedProcess(
             cmd, 0, stdout="ok", stderr=""
         ),
     )
@@ -225,7 +225,7 @@ def test_case_daily_uses_collect_dataset_when_materials_not_provided(tmp_path: P
 def test_article_daily_invokes_legacy_writer_with_materials_file(tmp_path: Path, monkeypatch):
     calls = []
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
 
@@ -255,7 +255,7 @@ def test_article_daily_invokes_legacy_writer_with_materials_file(tmp_path: Path,
 def test_case_daily_invokes_legacy_writer_with_materials_file(tmp_path: Path, monkeypatch):
     calls = []
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
 
@@ -377,7 +377,7 @@ def test_article_daily_persists_writer_logs_and_return_code(tmp_path: Path, monk
     monkeypatch.setattr(
         runtime_module.subprocess,
         "run",
-        lambda cmd, capture_output, text, timeout: subprocess.CompletedProcess(
+        lambda cmd, capture_output, text, timeout, **kwargs: subprocess.CompletedProcess(
             cmd,
             0,
             stdout="writer ok",
@@ -414,7 +414,7 @@ def test_case_daily_fails_when_writer_returns_non_zero_and_persists_logs(tmp_pat
     monkeypatch.setattr(
         runtime_module.subprocess,
         "run",
-        lambda cmd, capture_output, text, timeout: subprocess.CompletedProcess(
+        lambda cmd, capture_output, text, timeout, **kwargs: subprocess.CompletedProcess(
             cmd,
             2,
             stdout="partial output",

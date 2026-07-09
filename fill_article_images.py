@@ -10,7 +10,7 @@ For each missing FILENAME, generates search keywords from the alt text,
 downloads from Pexels, and saves as FILENAME.
 """
 
-import sys, os, re, json
+import sys, os, re, json, time
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -38,10 +38,30 @@ def main():
 
     print(f"Found {len(placeholders)} image placeholders.")
 
+    # R1: self-degrade when the global image-search budget is nearly exhausted
+    # — stop searching and fall through to the local placeholder so the writer
+    # still finishes within the 900s parent budget.
+    try:
+        _img_deadline = float(os.environ.get("IMAGE_SEARCH_DEADLINE", "0"))
+    except ValueError:
+        _img_deadline = 0.0
+
     for alt_text, filename in placeholders:
         output_path = images_dir / filename
         if output_path.exists() and output_path.stat().st_size > 5000:
             print(f"  ✅ {filename} — already exists, skipping")
+            continue
+
+        if _img_deadline and time.time() > _img_deadline - 60:
+            print(f"  ⏱️ Image-search budget nearly exhausted; using placeholder for '{filename}'")
+            if PLACEHOLDER_PATH.exists():
+                try:
+                    output_path.write_bytes(PLACEHOLDER_PATH.read_bytes())
+                    print(f"    ⚠️ Used local placeholder for {filename}")
+                    continue
+                except OSError as e:
+                    print(f"    ⚠️ Placeholder copy failed: {e}")
+            # No placeholder available; leave this image missing and move on.
             continue
 
         print(f"\n  🔍 Searching for: '{filename}' (alt: '{alt_text}')")

@@ -22,6 +22,12 @@ echo "=========================================="
 "$PYTHON" "$SCRIPT_DIR/platform_cli.py" run article-daily --date "$DATE" --workspace-dir "$SCRIPT_DIR"
 
 echo "=========================================="
+echo "Article job complete"
+echo "=========================================="
+
+"$PYTHON" "$SCRIPT_DIR/platform_cli.py" run case-daily --date "$DATE" --workspace-dir "$SCRIPT_DIR"
+
+echo "=========================================="
 echo "Business jobs complete"
 echo "Log: $LOG_FILE"
 echo "=========================================="

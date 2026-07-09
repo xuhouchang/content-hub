@@ -10,6 +10,13 @@ import datetime
 from pathlib import Path
 from typing import Optional
 
+# URL normalization for dedup-aware comparisons. Guarded so root collectors
+# that run without `content_platform` on sys.path never crash.
+try:
+    from content_platform.normalize.urls import normalize_url
+except Exception:  # pragma: no cover - fallback only if package layout changes
+    normalize_url = None
+
 # ═══════════════════════════════════════════════════
 # Paths
 # ═══════════════════════════════════════════════════
@@ -122,7 +129,14 @@ def save_url_registry(registry: dict):
 
 
 def is_duplicate(url: str, registry: dict) -> bool:
-    """Check if URL already exists in the registry."""
+    """Check if URL already exists in the registry (normalization-aware).
+
+    Two URLs that differ only by tracking params (?utm_source=...), scheme
+    (http/https) or a trailing slash are treated as the same article.
+    """
+    if normalize_url is not None:
+        norm = normalize_url(url)
+        return any(normalize_url(k) == norm for k in registry)
     return url.strip() in registry
 
 
@@ -131,6 +145,8 @@ def append_to_url_registry(url: str, status: str = "collected", date_str: str = 
 
     Checks in-memory if URL already exists; if so, updates status at the TSV level
     by rewriting the whole file (only when needed — avoids duplicates entirely).
+    The raw URL is preserved in the TSV (downstream content lookups rely on it);
+    only the *comparison* is normalization-aware.
     """
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     if not TSV_PATH.exists():
@@ -143,15 +159,72 @@ def append_to_url_registry(url: str, status: str = "collected", date_str: str = 
         return
 
     registry = load_url_registry()
-    if url in registry:
-        # Already exists — optionally bump status
-        if registry[url]["status"] != status:
-            registry[url]["status"] = status
-            registry[url]["date"] = date
+    if is_duplicate(url, registry):
+        # Already exists (normalization-aware). Locate the original raw key
+        # and bump its status/date if changed.
+        existing_key = url
+        if normalize_url is not None:
+            norm = normalize_url(url)
+            for k in registry:
+                if normalize_url(k) == norm:
+                    existing_key = k
+                    break
+        if registry[existing_key]["status"] != status:
+            registry[existing_key]["status"] = status
+            registry[existing_key]["date"] = date
             save_url_registry(registry)
     else:
         with open(TSV_PATH, "a") as f:
             f.write(f"{url}\t{status}\t{date}\n")
+
+
+# ═══════════════════════════════════════════════════
+# Content-hash Registry (cross-run content-level dedup)
+# ═══════════════════════════════════════════════════
+# Catches syndicated reprints: the same article arriving from a *different*
+# URL. Keyed by sha256 of the (substantive) article body.
+# Path is workspace-relative so tests stay hermetic and production dedup still
+# spans days within the same workspace.
+
+def _content_hash_tsv(workspace_dir=None):
+    base = Path(workspace_dir) / "reports" / "_index" if workspace_dir else INDEX_DIR
+    return base / "content_hashes.tsv"
+
+
+def load_content_hashes(workspace_dir=None) -> dict:
+    """Load {content_hash: original_url} map from content_hashes.tsv."""
+    tsv = _content_hash_tsv(workspace_dir)
+    registry = {}
+    if tsv.exists():
+        with open(tsv) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    registry[parts[0].strip()] = parts[1].strip()
+    return registry
+
+
+def is_content_duplicate(content_hash: str, workspace_dir=None) -> str | None:
+    """Return the original source URL if this content hash was seen before.
+
+    Returns None when the hash is empty or unknown.
+    """
+    if not content_hash:
+        return None
+    return load_content_hashes(workspace_dir).get(content_hash)
+
+
+def mark_content_seen(content_hash: str, url: str, workspace_dir=None):
+    """Persist a content hash -> source url mapping for future dedup."""
+    if not content_hash:
+        return
+    tsv = _content_hash_tsv(workspace_dir)
+    tsv.parent.mkdir(parents=True, exist_ok=True)
+    with open(tsv, "a") as f:
+        f.write(f"{content_hash}\t{url}\n")
 
 
 # ═══════════════════════════════════════════════════

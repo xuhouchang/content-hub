@@ -53,8 +53,23 @@ DEFAULT_WRITING_MODEL = os.environ.get("WRITING_MODEL", "openai/gpt-5.4")
 # 300s/3 retries). A single retried call could run ~990s and blow the parent
 # pipeline budget. Now configurable and tightened; a `deadline` can further
 # short-circuit runaway retries.
-LLM_CALL_TIMEOUT = int(os.environ.get("LLM_CALL_TIMEOUT", "120"))
-LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "2"))
+#
+# P2-6: long-form writing uses max_tokens=8192, which can take well over the
+# old 120s — bump the default per-call timeout to 300s to avoid false timeouts.
+# P1-2: the global budget is injected by content_platform/runtime.py via the
+# LLM_DEADLINE env var (absolute epoch-seconds). call_model() reads it as the
+# default deadline so the OpenRouter->DeepSeek fallback short-circuits before
+# blowing the 900s parent budget.
+LLM_CALL_TIMEOUT = int(os.environ.get("LLM_CALL_TIMEOUT", "300"))
+# Retries trimmed 3->2 (P0) and 2->1 (P1-2) so the worst case per call_model
+# stays bounded: 1 attempt x 300s OpenRouter + 1 attempt x 300s DeepSeek = 600s
+# worst, comfortably under the 900s parent and the LLM_DEADLINE budget. The
+# OpenRouter->DeepSeek cross-provider fallback still provides redundancy.
+LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "1"))
+# Absolute wall-clock deadline (epoch seconds) for the whole writer run.
+# None when not injected (callers that don't pass `deadline=` and runtime
+# doesn't set LLM_DEADLINE get no short-circuit — same as before P1-2).
+LLM_DEADLINE = float(os.environ["LLM_DEADLINE"]) if os.environ.get("LLM_DEADLINE") else None
 
 
 def resolve_model(model_id: str) -> str:
@@ -238,6 +253,19 @@ def call_model(
     Returns:
         Response text string, or None on failure.
     """
+    # P1-2: use the globally-injected deadline (LLM_DEADLINE, set by
+    # runtime.py) when no explicit deadline is passed. This makes the
+    # per-attempt short-circuit in call_openrouter/call_deepseek_direct
+    # actually fire instead of being dead code.
+    if deadline is None:
+        deadline = LLM_DEADLINE
+    # R1: if the global budget is already exhausted, abort remaining LLM calls
+    # immediately instead of spending the last seconds on a provider that will
+    # also fail. This is the LLM stage's contribution to the auto-degrade so
+    # the writer always finishes and publishes within the 900s parent budget.
+    if deadline is not None and time.time() > deadline:
+        print("⏱️ deadline exceeded, aborting remaining LLM calls")
+        return None
     model = model or DEFAULT_WRITING_MODEL
 
     # ── 固化模型路由规则（不依赖 Skills / agent prompt）──

@@ -256,6 +256,8 @@ def cmd_search(query: str, args) -> int:
     
     url = "https://api.anysearch.com/v1/search"
     api_key = os.environ.get("ANYSEARCH_API_KEY", "")
+    if not api_key:
+        print("⚠️ ANYSEARCH_API_KEY 缺失，案例搜索将失败（请在 .env / 环境变量中配置）")
     
     payload = json.dumps({
         "query": query,
@@ -475,6 +477,8 @@ def _search_cases(query: str, max_results: int = 10) -> list[dict]:
     """Search for case studies using AnySearch."""
     url = "https://api.anysearch.com/v1/search"
     api_key = os.environ.get("ANYSEARCH_API_KEY", "")
+    if not api_key:
+        print("⚠️ ANYSEARCH_API_KEY 缺失，案例搜索将失败（请在 .env / 环境变量中配置）")
     
     payload = json.dumps({
         "query": query,

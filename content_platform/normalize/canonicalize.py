@@ -5,7 +5,7 @@ from content_platform.normalize.urls import normalize_url
 
 def build_material_record(raw: dict, collected_at: str) -> dict:
     content_text = raw.get("content_text", "").strip()
-    content_hash = hashlib.sha256(content_text.encode("utf-8")).hexdigest()
+    content_hash = "sha256:" + hashlib.sha256(content_text.encode("utf-8")).hexdigest()
 
     return {
         "material_id": raw.get("material_id", ""),
@@ -17,7 +17,7 @@ def build_material_record(raw: dict, collected_at: str) -> dict:
         "title": raw.get("title", ""),
         "summary": raw.get("summary", ""),
         "content_text": content_text,
-        "content_hash": f"sha256:{content_hash}",
+        "content_hash": content_hash,
         "tags": {},
         "relevance": {"status": "unknown", "reason": "", "model": ""},
         "dedup": {

@@ -1,7 +1,9 @@
 from datetime import datetime
 from pathlib import Path
+import os
 import subprocess
 import sys
+import time
 
 from content_platform.business.case_study.pipeline import run_case_study_pipeline
 from content_platform.business.daily_article.pipeline import run_daily_article_pipeline
@@ -20,6 +22,18 @@ from content_platform.normalize.canonicalize import build_material_record
 from content_platform.paths import PlatformPaths
 from content_platform.storage.json_store import read_json
 from content_platform.storage.json_store import write_json
+
+# Content-hash dedup registry (cross-run reprint detection). Guarded so the
+# module still imports if lib's content_platform dependency is unavailable.
+try:
+    from lib import is_content_duplicate, mark_content_seen
+except Exception:  # pragma: no cover
+    is_content_duplicate = None
+    mark_content_seen = None
+
+# Only substantive bodies are trusted for content-level dedup; stubs would
+# otherwise collide on a constant hash.
+_MIN_CONTENT_DEDUP_CHARS = 200
 
 
 def load_curated_cache(date_str: str, paths: PlatformPaths) -> dict[str, dict]:
@@ -116,9 +130,30 @@ def _curate_materials(
         for material in new_materials
     ]
     clustered = assign_clusters(normalized)
-    
+
+    # Drop content-level duplicates. Two cases:
+    #  • within-run: two URLs carrying the same body in this batch
+    #  • cross-run: a reprint whose hash was persisted when it was previously
+    #    committed to a writer (see run_article_daily / run_case_daily).
+    # Note: we only *read* the registry here; persistence happens at commit
+    # time so a fresh collect never flags its own just-collected material.
+    # The registry is workspace-relative so it spans days within a workspace.
+    seen_hashes: dict[str, str] = {}
+    kept = []
+    for c, r in zip(clustered, new_materials):
+        h = c.get("content_hash", "")
+        if h and len(c.get("content_text", "")) >= _MIN_CONTENT_DEDUP_CHARS:
+            dup_of = seen_hashes.get(h)
+            if dup_of is None and is_content_duplicate is not None:
+                dup_of = is_content_duplicate(h, workspace_dir=resolved_workspace)
+            if dup_of:
+                print(f"  🧹 Content-dedup dropped reprint of {str(dup_of)[:60]}")
+                continue
+            seen_hashes[h] = c.get("canonical_url") or c.get("url", "")
+        kept.append((c, r))
+
     newly_curated = []
-    for material, raw in zip(clustered, new_materials):
+    for material, raw in kept:
         enriched = dict(material)
         enriched["editorial_fit_score"] = editorial_fit_score(
             {
@@ -248,7 +283,19 @@ def _invoke_legacy_writer(script_path: Path, date_str: str, materials_file: str,
     # Generous budget for the WRITE stage now that publishing is decoupled into
     # a separate process. 900s covers writing + polish + image search + embed,
     # while per-call LLM timeouts/retries are governed centrally in lib/llm.py.
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    # P1-2: inject an absolute LLM deadline (epoch seconds) so call_model()
+    # short-circuits the OpenRouter->DeepSeek fallback before the parent
+    # timeout. 840s leaves ~60s headroom under the 900s parent budget.
+    env = os.environ.copy()
+    # R1: single global budget (840s leaves ~60s headroom under the 900s
+    # parent). LLM_DEADLINE governs lib/llm.call_model; IMAGE_SEARCH_DEADLINE
+    # governs the image-search stage (multi-image worst case can run hundreds
+    # of seconds) so it can self-degrade to placeholders instead of blowing
+    # the parent budget. Both are inherited by write_article.py and its child
+    # image_search.py subprocesses.
+    env["LLM_DEADLINE"] = str(time.time() + 840)
+    env["IMAGE_SEARCH_DEADLINE"] = str(time.time() + 840)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env)
 
 
 def _write_job_log(job_dir: Path, filename: str, content: str) -> str:
@@ -280,6 +327,26 @@ def _capture_writer_artifacts(job_dir: Path, result: subprocess.CompletedProcess
     return artifacts
 
 
+def _persist_selected_content_hashes(mat_file: str, workspace_dir=None):
+    """Record the content hashes of materials committed to a writer.
+
+    This is what makes cross-run content-dedup actually work: a reprint seen
+    on a later day is dropped by `_curate_materials` because its hash is already
+    here. Only substantive bodies are persisted (stubs are skipped).
+    """
+    if mark_content_seen is None:
+        return
+    try:
+        data = read_json(Path(mat_file))
+    except Exception:
+        return
+    items = data if isinstance(data, list) else data.get("materials", [])
+    for m in items:
+        h = m.get("content_hash", "")
+        if h and len(m.get("content_text", "")) >= _MIN_CONTENT_DEDUP_CHARS:
+            mark_content_seen(h, m.get("canonical_url") or m.get("url", ""), workspace_dir=workspace_dir)
+
+
 def run_article_daily(
     date_str: str,
     workspace_dir: Path | None = None,
@@ -306,6 +373,7 @@ def run_article_daily(
 
     writer_all_stdouts: list[str] = []
     writer_all_exit_codes: list[int] = []
+    writer_artifacts: dict = {}
 
     # Write multiple articles (one per selected cluster)
     materials_files = result.get("materials_files", [result.get("materials_file")] if result.get("materials_file") else [])
@@ -318,8 +386,17 @@ def run_article_daily(
                 materials_file=mat_file,
                 extra_args=None,
             )
+            # Persist content hashes only on a successful write, so the registry
+            # reflects *published* content. This is what lets a later-day reprint
+            # (different URL, same body) be deduped — without ever flagging this
+            # run's own freshly-collected material.
+            if legacy_result.returncode == 0:
+                _persist_selected_content_hashes(mat_file, workspace_dir=resolved_workspace)
             writer_all_stdouts.append(legacy_result.stdout or "")
             writer_all_exit_codes.append(legacy_result.returncode)
+            # Capture writer logs + return code (mirrors run_case_daily).
+            if i == 0:
+                writer_artifacts = _capture_writer_artifacts(job_dir, legacy_result)
         else:
             writer_all_exit_codes.append(-1)
 
@@ -328,14 +405,7 @@ def run_article_daily(
         "materials_file": result.get("materials_file"),
         "writer_exit_codes": writer_all_exit_codes,
     }
-
-    # Capture artifacts from first writer run for backwards compat
-    if materials_files and writer_all_stdouts:
-        stdout_combined = "\n---\n".join(writer_all_stdouts)
-        import tempfile
-        tmp_stdout = job_dir / "writer_stdout.log"
-        tmp_stdout.write_text(stdout_combined, encoding="utf-8")
-        job["artifacts"]["writer_stdout_log"] = str(tmp_stdout)
+    job["artifacts"].update(writer_artifacts)
 
     all_success = all(c == 0 for c in writer_all_exit_codes)
     if not all_success:
@@ -371,6 +441,8 @@ def run_case_daily(
         "materials_file": result.get("materials_file"),
     }
     if job["status"] == "success" and result.get("materials_file"):
+        # Persist content hashes so a later-day reprint is deduped.
+        _persist_selected_content_hashes(result["materials_file"], workspace_dir=resolved_workspace)
         legacy_result = _invoke_legacy_writer(
             resolved_workspace / "decompose_case_study.py",
             date_str=date_str,

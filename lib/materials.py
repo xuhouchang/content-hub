@@ -557,7 +557,7 @@ def _pick_best_cluster(clusters: dict[str, list[dict]], max_count: int = 5) -> l
     seen_domains: dict[str, int] = {}
     deduped = []
     for m in sorted(selected, key=lambda x: x.get("score", 0), reverse=True):
-        domain = urllib.parse.urlparse(m.get("url", "")).netloc.split(".")[-2] if m.get("url") else "unknown"
+        domain = _registrable_domain(m.get("url", ""))
         if domain not in seen_domains:
             seen_domains[domain] = 0
         if seen_domains[domain] < 2:
@@ -565,6 +565,40 @@ def _pick_best_cluster(clusters: dict[str, list[dict]], max_count: int = 5) -> l
             seen_domains[domain] += 1
 
     return deduped[:max_count]
+
+
+# Multi-level public suffixes that must be skipped when extracting the
+# registrable domain (otherwise e.g. bbc.co.uk would collapse to "co").
+_MULTI_LEVEL_TLDS = {
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "net.uk",
+    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn", "com.tw",
+    "com.au", "net.au", "org.au", "gov.au", "edu.au",
+    "co.nz", "org.nz", "govt.nz",
+    "co.jp", "or.jp", "ne.jp", "go.jp", "com.jp",
+    "com.br", "com.mx", "co.in", "com.hk",
+}
+
+
+def _registrable_domain(url: str) -> str:
+    """Return the registrable domain (e.g. 'bbc' for 'www.bbc.co.uk').
+
+    Handles multi-level public suffixes (co.uk, com.cn, ...); falls back to the
+    last two labels for unknown TLDs, and 'unknown' for empty URLs.
+    """
+    if not url:
+        return "unknown"
+    netloc = urllib.parse.urlparse(url).netloc.lower()
+    if not netloc:
+        return "unknown"
+    # strip any userinfo and port
+    netloc = netloc.split("@")[-1].split(":")[0]
+    labels = netloc.split(".")
+    if len(labels) <= 2:
+        return netloc
+    last_two = ".".join(labels[-2:])
+    if last_two in _MULTI_LEVEL_TLDS:
+        return ".".join(labels[-3:])
+    return last_two
 
 
 def sample_materials(materials: list[dict], max_count: int = 5) -> list[dict]:

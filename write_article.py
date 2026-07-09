@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -456,6 +457,17 @@ def count_image_placeholders(content: str) -> int:
 
 def run_image_search(query: str, output_dir: str, index: int = 1) -> bool:
     """Run image_search.py for one query. Returns True if at least one image downloaded."""
+    # R1: skip remaining image searches when the global budget is nearly
+    # exhausted. We guard here (in addition to image_search.py itself) so we
+    # don't even spawn the subprocess — the writer then finishes and publishes
+    # instead of being killed at the 900s parent limit.
+    try:
+        _img_deadline = float(os.environ.get("IMAGE_SEARCH_DEADLINE", "0"))
+    except ValueError:
+        _img_deadline = 0.0
+    if _img_deadline and time.time() > _img_deadline - 60:
+        print(f"  ⏱️ Image-search budget nearly exhausted; skipping '{query}' (placeholder fallback)")
+        return False
     if not IMAGE_MATCHER_SCRIPT.exists():
         print(f"  ⚠️ image_search.py not found: {IMAGE_MATCHER_SCRIPT}")
         return False
@@ -537,6 +549,11 @@ def write_article(
 
     Returns the output directory path on success, None on failure.
     """
+    # R1: phase timing anchors for the segmented budget log (written at the end).
+    t_write_start = time.time()
+    t_polish_start = None
+    t_img_start = None
+
     print(f"\n{'='*60}")
     print(f"📝 Article Pipeline — {date_str}")
     print(f"{'='*60}")
@@ -882,6 +899,7 @@ def write_article(
 
     # Step 6: Polish article with OpenAI via OpenRouter
     # Done BEFORE image matching — text must be finalized first
+    t_polish_start = time.time()
     print("\n6️⃣  Polishing article...")
     if POLISH_SCRIPT.exists():
         cmd = [
@@ -907,8 +925,7 @@ def write_article(
 
     # ── Hard post-processing: clean AI-typical phrasing ──
     print("\n🔧 Running hard post-processing on article text...")
-    from lib.llm import call_model as _call_llm
-    
+
     def _hard_clean_article(text: str) -> str:
         """One-pass hard regex post-processing to scrub AI-typical phrasing.
         Applied AFTER LLM polish, as a safety net.
@@ -969,6 +986,7 @@ def write_article(
     article_path.write_text(article, encoding="utf-8")
 
     # Step 7: Match images (after text is finalized)
+    t_img_start = time.time()
     print("\n7️⃣  Matching images...")
     num_placeholders = count_image_placeholders(article)
     print(f"  Found {num_placeholders} image placeholders")
@@ -1036,6 +1054,20 @@ def write_article(
         else:
             print(f"     📄 {f.name}")
 
+    # ── R1: segmented timing log for budget observability ──
+    t_end = time.time()
+    _polish_anchor = t_polish_start or t_end
+    _img_anchor = t_img_start or t_end
+    write_dur = _polish_anchor - t_write_start
+    polish_dur = _img_anchor - _polish_anchor
+    img_dur = t_end - _img_anchor
+    total_dur = t_end - t_write_start
+    print(f"\n⏱️  Pipeline timing — write: {write_dur:.1f}s | polish(+post): "
+          f"{polish_dur:.1f}s | image+embed: {img_dur:.1f}s | TOTAL: {total_dur:.1f}s")
+    if total_dur > 800:
+        print(f"  ⚠️ near budget: total {total_dur:.1f}s > 800s; "
+              f"consider tightening LLM/image stages for headroom")
+
     return str(output_dir)
 
 
@@ -1088,12 +1120,21 @@ def launch_publish_worker() -> bool:
         print(f"  ⚠️ publish_worker.py not found at {WORKER_PATH}; cannot auto-launch")
         return False
     try:
+        # P2-4: don't swallow the worker's output. Redirect to a log file
+        # (matches run_publish_worker.sh's logs/ convention) so auto-publish
+        # failures are diagnosable instead of silent.
+        log_dir = WORKER_PATH.parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = log_dir / f"publish_auto_{ts}.log"
+        log_fd = open(log_path, "a", encoding="utf-8")
         subprocess.Popen(
             [sys.executable, str(WORKER_PATH), "--once"],
             start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_fd,
+            stderr=log_fd,
         )
+        print(f"  🚀 Publish worker launched (log: {log_path})")
         return True
     except OSError as e:
         print(f"  ⚠️ Failed to launch publish worker: {e}")
@@ -1117,6 +1158,13 @@ def main():
     parser.add_argument("--no-publish", action="store_true",
                         help="Skip enqueueing the article for async WeChat publishing (local testing)")
     args = parser.parse_args()
+
+    # R1: compute ONE global budget here and inject it as env vars so every
+    # spawned subprocess (image_search.py, polish, embed) and lib/llm.call_model
+    # share the same clock. 840s leaves ~60s headroom under the 900s parent.
+    PIPELINE_DEADLINE = time.time() + 840
+    os.environ["LLM_DEADLINE"] = str(PIPELINE_DEADLINE)
+    os.environ["IMAGE_SEARCH_DEADLINE"] = str(PIPELINE_DEADLINE)
 
     date_str = args.date or datetime.date.today().isoformat()
 

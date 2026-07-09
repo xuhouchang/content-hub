@@ -586,6 +586,20 @@ def main():
             if new_content != article["content"]:
                 replaced += 1
             article["content"] = new_content
+    # P2-7: covers are excluded from inline upload (see
+    # upload_article_images_as_urls), so any <img> still pointing at a cover
+    # file (e.g. if the LLM referenced ./images/cover-wide.jpg in the body)
+    # would render as a broken image. Strip those paragraphs.
+    COVER_NAMES = {"cover-1x1.jpg", "cover-1x1.png", "cover-wide.jpg", "cover-wide.png"}
+    for cover_name in COVER_NAMES:
+        article["content"] = re.sub(
+            r'<p style="margin: 24px 0;"><img src="[^"]*'
+            + re.escape(cover_name)
+            + r'[^"]*"[^>]*></p>',
+            "",
+            article["content"],
+        )
+
     if url_map and replaced == 0:
         print("  ⚠️ No local image src matched the uploaded files; check embed/naming")
 
@@ -619,6 +633,10 @@ def main():
     # Step 6: Create draft
     media_id = publisher.create_draft(article, thumb_media_id)
     print(f"✅ Draft created: {media_id}")
+    # Structured marker for machine parsing by publish_worker.py. It scans
+    # stdout for this exact token (not the human "Draft created" line, which in
+    # create_draft() also contains a title and would pollute the media_id).
+    print(f"DRAFT_MEDIA_ID={media_id}")
 
     # Step 6a: Mark sources as used in URL registry
     mark_article_sources(args.article)

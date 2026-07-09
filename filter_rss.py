@@ -11,7 +11,7 @@ import os
 import subprocess
 import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lib import load_filtered, save_raw, TMP_DIR
+from lib import TMP_DIR
 
 # Path to SKILL rules for filter prompt
 RULES_PATH = os.path.expanduser("~/.openclaw/skills/research-report-collector/rules.md")

@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -164,6 +165,25 @@ def main():
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not PEXELS_API_KEY and not PIXABAY_API_KEY:
+        print("⚠️ PEXELS_API_KEY / PIXABAY_API_KEY 均缺失：远程配图将全部走本地 placeholder 兜底")
+
+    # R1: self-degrade to the local placeholder when the global image-search
+    # budget is nearly exhausted, so the writer finishes and publishes instead
+    # of being killed at the 900s parent limit. The parent loop also guards
+    # this, but we double-check here since this script runs as a subprocess.
+    try:
+        _img_deadline = float(os.environ.get("IMAGE_SEARCH_DEADLINE", "0"))
+    except ValueError:
+        _img_deadline = 0.0
+    if _img_deadline and time.time() > _img_deadline - 60:
+        print(f"  ⏱️ Image-search budget nearly exhausted; "
+              f"using placeholder for: {args.query}")
+        if _use_placeholder(Path(args.output_dir) / "image-001-pexels", args.index):
+            sys.exit(0)
+        print(f"  ❌ No placeholder available either; giving up")
+        sys.exit(1)
 
     # Search
     photos = search(args.query)

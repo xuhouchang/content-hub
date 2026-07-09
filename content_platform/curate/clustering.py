@@ -246,7 +246,9 @@ def _cluster_seed(material: dict) -> str:
             seen.add(tok)
 
     if priority_hits:
-        seed = priority_hits[:2]
+        # Sort so materials sharing the same priority-token set always map to the
+        # same cluster id regardless of token order in the source text.
+        seed = sorted(priority_hits)[:2]
         return "cluster_" + "_".join(seed)
 
     # 2) Include title + summary to find shared thematic words
