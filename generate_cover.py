@@ -72,7 +72,7 @@ Keywords:"""
         {"role": "user", "content": prompt},
     ]
 
-    response = call_model(messages, temperature=0.4, max_tokens=200, model="deepseek-chat")
+    response = call_model(messages, temperature=0.4, max_tokens=200, model="deepseek-v4-flash")
     if not response:
         return ["business technology", "enterprise digital", "professional workspace"]
 

@@ -370,7 +370,10 @@ def test_collect_daily_derives_execution_detail_score_when_not_provided(tmp_path
     )
 
     assert result["status"] == "success"
-    assert curated[0]["execution_detail_score"] >= 0.6
+    # 纯治理/风险/安全素材（无企业落地证据）执行细节分必须 LOW（< CASE_DETAIL_THRESHOLD=0.6），
+    # 不得仅凭 governance/framework/evaluation 等词成为案例池（case_pool）高分捷径。
+    # 若执行细节分未提供，按新 rubric 由 governance cap + 缺 impl 证据推导为低值。
+    assert curated[0]["execution_detail_score"] < 0.6
 
 
 def test_article_daily_persists_writer_logs_and_return_code(tmp_path: Path, monkeypatch):

@@ -50,6 +50,19 @@ def upload_image_get_url(token, image_path):
         return data['url']
     raise Exception(f"upload_image_get_url failed: {data}")
 
+
+def _add_header_template(raw_md: str, title: str) -> str:
+    """Prepend brand template header to article content."""
+    now = time.strftime('%Y-%m-%d')
+    template = (
+        "\n"
+        "> 内容中枢 \u00b7 每日精选\n"
+        f"> {now}   \u00b7  #AI\u521b\u4e1a  #\u5927\u6a21\u578b  #\u5546\u4e1a\u6d1e\u5bdf\n"
+        "> ---\n"
+        "\n"
+    )
+    return template.strip() + '\n\n' + raw_md
+
 def _md_to_html(md_text):
     """Convert markdown to WeChat-compatible HTML with proper typography.
 
@@ -59,7 +72,7 @@ def _md_to_html(md_text):
       - H2: 18px bold, top margin 28px, bottom 12px
       - H3: 17px bold, top margin 20px, bottom 8px
       - Paragraph: 16px, line-height 1.8
-      - Blockquote: 15px, left blue border (#1a73e8), gray bg
+      - Blockquote: 15px, left purple border (#7c3aed), light purple bg
       - Image: width 100%, border-radius 8px, margin 16px 0
       - HR: styled divider
       - UL/LI: proper list indentation
@@ -111,8 +124,8 @@ def _md_to_html(md_text):
                 if html_parts and html_parts[-1].startswith('<p>'):
                     pass  # close previous paragraph before blockquote
                 html_parts.append(
-                    '<section style="border-left: 4px solid #1a73e8; '
-                    'background-color: #f7f9fc; padding: 12px 16px; '
+                    '<section style="border-left: 4px solid #7c3aed; '
+                    'background-color: #f5f0ff; padding: 12px 16px; '
                     'margin: 16px 0; font-size: 15px; color: #555; '
                     'border-radius: 0 6px 6px 0;">'
                 )
@@ -315,8 +328,17 @@ def main():
     cover_media_id = upload_image(token, str(cover_path))
     print("  Cover uploaded: " + cover_media_id[:20] + "...")
     
+    # Prepend brand template header
+    tmp_md_text = md_path.read_text(encoding='utf-8')
+    tmp_md_text = _add_header_template(tmp_md_text, title)
+    tmp_path = md_path.with_suffix('.md.tmp')
+    tmp_path.write_text(tmp_md_text, encoding='utf-8')
+    
     print("Converting article to HTML...")
-    html_content = article_to_html(md_path, img_dir, token)
+    html_content = article_to_html(tmp_path, img_dir, token)
+    # Clean up temp file
+    if tmp_path.exists():
+        tmp_path.unlink()
     print("  HTML: " + str(len(html_content)) + " chars")
     
     print("Creating WeChat draft...")

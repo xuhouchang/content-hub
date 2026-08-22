@@ -186,7 +186,7 @@ def write_framework(
     response = call_model(
         [{"role": "system", "content": FRAMEWORK_PROMPT},
          {"role": "user", "content": user_prompt}],
-        temperature=0.7, max_tokens=8192, model=FRAMEWORK_MODEL,
+        temperature=0.7, max_tokens=None, model=FRAMEWORK_MODEL,
     )
     if not response:
         print("  ❌ Model returned no response")

@@ -51,9 +51,15 @@ def load_sources(force_reload: bool = False) -> dict:
 
 
 def get_sources(category: str) -> list[dict]:
-    """Get source list for a specific category (rss, blogs, thinktank)."""
+    """Get source list for a specific category (rss, blogs, thinktank).
+
+    Sources with `enabled: false` (or `enabled: False`) in sources.yaml are
+    filtered out — used to selectively disable noisy/off-topic feeds without
+    deleting them. This is the single choke point all ingest paths go through.
+    """
     data = load_sources()
-    return data.get(category, [])
+    sources = data.get(category, [])
+    return [s for s in sources if s.get("enabled", True) is not False]
 
 
 def get_filtering_rules() -> list[dict]:
@@ -301,6 +307,11 @@ SKIP_KEYWORDS = [
     "earning", "quarterly", "dividend", "market cap",
     "game review", "movie review", "sports", "celebrity",
     "recipe", "travel guide", "fashion", "crypto price",
+    # 2026-08-02 加严：泛营销/广告/投放话题，与本号「企业AI落地」无关
+    "ad visibility", "ad campaign", "ad spend", "paid acquisition",
+    "growth hacking", "marketing funnel", "conversion rate optimization",
+    "customer acquisition cost", "retention strategy", "go-to-market",
+    "brand awareness", "viral growth", "growth loops",
 ]
 
 
@@ -382,29 +393,38 @@ def _fetch_direct(url: str, timeout: int = 20, prefer_markdown: bool = True) -> 
         return None
 
 
-def _fetch_via_jina(url: str, timeout: int = 30) -> str | None:
-    """Fetch via Jina.ai reader API."""
-    config = _load_fetch_config()
-    jina = config.get("jina", {})
-    if not jina.get("enabled", False):
-        return None
-    api_key = jina.get("api_key", "")
-    if not api_key or api_key == "your_jina_api_key_here":
-        api_key = os.environ.get("JINA_API_KEY", "")
-    base_url = jina.get("base_url", "https://r.jina.ai")
-    if not api_key:
-        return None
+def _fetch_via_crawl4ai(url: str, timeout: int = 30) -> str | None:
+    """Fetch a URL via crawl4ai (local, free), returning markdown text.
+
+    Uses AsyncWebCrawler with a lightweight headless browser.
+    Replaces Jina.ai Reader API (which now requires payment).
+    """
+    import asyncio
+
     try:
-        import requests
-        resp = requests.get(
-            f"{base_url}/{url}",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        return resp.text
+        from crawl4ai import AsyncWebCrawler
+
+        async def do_fetch():
+            async with AsyncWebCrawler(verbose=False) as crawler:
+                result = await crawler.arun(
+                    url=url,
+                    word_count_threshold=10,
+                    bypass_cache=True,
+                )
+                return result.markdown if result else None
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            markdown = loop.run_until_complete(do_fetch())
+        finally:
+            loop.close()
+
+        if markdown and len(markdown.strip()) >= 300:
+            return markdown.strip()[:50000]
+        return None
     except Exception as e:
-        print(f"  [WARN] Jina fetch failed for {url}: {e}")
+        print(f"  [WARN] Crawl4AI fetch failed for {url[:70]}: {e}")
         return None
 
 
@@ -417,28 +437,25 @@ def fetch_url(url: str, timeout: int = 30, prefer: str = "direct") -> str | None
     """Fetch a URL, returning text content.
 
     Priority:
-      1. direct HTTP (unless prefer="jina")
-      2. Jina.ai reader (if enabled in sources.yaml)
+      1. direct HTTP
+      2. crawl4ai (local headless browser, free)
 
     Args:
         url: The URL to fetch.
         timeout: Max wait time in seconds.
-        prefer: "direct" (default, try direct first) or "jina" (Jina only).
+        prefer: "direct" (default, try direct first) or "crawl4ai" (skip direct).
 
     Returns:
         Response text, or None if all methods fail.
     """
-    result = None
-
-    if prefer == "jina":
-        # Skip direct, go straight to Jina
-        return _fetch_via_jina(url, timeout=timeout)
+    if prefer == "crawl4ai":
+        return _fetch_via_crawl4ai(url, timeout=timeout)
 
     # Try direct first
     result = _fetch_direct(url, timeout=timeout)
     if result:
         return result
 
-    # Fallback to Jina
-    print(f"  ↪ Direct fetch failed for {url[:60]}..., falling back to Jina.ai")
-    return _fetch_via_jina(url, timeout=timeout)
+    # Fallback to crawl4ai
+    print(f"  ↪ Direct fetch failed for {url[:60]}..., falling back to crawl4ai")
+    return _fetch_via_crawl4ai(url, timeout=timeout)

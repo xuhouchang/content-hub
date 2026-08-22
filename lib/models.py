@@ -10,12 +10,12 @@ Usage:
     model = get_model("writing")
 
 Environment variable overrides:
-    MODEL_WRITING      — 公众号写作 (default: openai/gpt-5.4)
-    MODEL_POLISH       — 润色       (default: openai/gpt-5.4)
-    MODEL_CASE         — 案例拆解   (default: deepseek/deepseek-chat)
-    MODEL_FILTER       — 素材过滤   (default: deepseek/deepseek-chat)
-    MODEL_SYNTHESIS    — 周度整合   (default: openai/gpt-5.4)
-    MODEL_FRAMEWORK    — 框架文章   (default: openai/gpt-5.4)
+    MODEL_WRITING      — 公众号写作 (default: deepseek/deepseek-v4-flash)
+    MODEL_POLISH       — 润色       (default: deepseek/deepseek-v4-flash)
+    MODEL_CASE         — 案例拆解   (default: deepseek/deepseek-v4-flash)
+    MODEL_FILTER       — 素材过滤   (default: deepseek/deepseek-v4-flash)
+    MODEL_SYNTHESIS    — 周度整合   (default: deepseek/deepseek-v4-flash)
+    MODEL_FRAMEWORK    — 框架文章   (default: deepseek/deepseek-v4-flash)
 
 Legacy:
     WRITING_MODEL env var is still respected as a blanket fallback.
@@ -27,12 +27,12 @@ import os
 from typing import Optional
 
 _MODELS = {
-    "writing":    os.environ.get("MODEL_WRITING",    "openai/gpt-5.4"),
-    "polish":     os.environ.get("MODEL_POLISH",     "openai/gpt-5.4"),
-    "case":       os.environ.get("MODEL_CASE",       "deepseek/deepseek-chat"),
-    "filter":     os.environ.get("MODEL_FILTER",     "deepseek/deepseek-chat"),
-    "synthesis":  os.environ.get("MODEL_SYNTHESIS",  "openai/gpt-5.4"),
-    "framework":  os.environ.get("MODEL_FRAMEWORK",  "openai/gpt-5.4"),
+    "writing":    os.environ.get("MODEL_WRITING",    "deepseek/deepseek-v4-flash"),
+    "polish":     os.environ.get("MODEL_POLISH",     "deepseek/deepseek-v4-flash"),
+    "case":       os.environ.get("MODEL_CASE",       "deepseek/deepseek-v4-flash"),
+    "filter":     os.environ.get("MODEL_FILTER",     "deepseek/deepseek-v4-flash"),
+    "synthesis":  os.environ.get("MODEL_SYNTHESIS",  "deepseek/deepseek-v4-flash"),
+    "framework":  os.environ.get("MODEL_FRAMEWORK",  "deepseek/deepseek-v4-flash"),
 }
 
 

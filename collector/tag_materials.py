@@ -137,7 +137,7 @@ IMPORTANT: Only output the JSON array, nothing else."""
         {"role": "user", "content": user_prompt},
     ]
 
-    response = call_model(messages, temperature=0.3, max_tokens=4096, model="deepseek-chat")
+    response = call_model(messages, temperature=0.3, max_tokens=4096, model="deepseek-v4-flash")
     if not response:
         print(f"  ❌ Batch {batch_index}: LLM returned no response")
         return []

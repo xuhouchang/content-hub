@@ -25,7 +25,7 @@ from lib import (
 )
 
 # ── Paths ──
-WORKSPACE_DIR = Path(__file__).resolve().parent.parent.parent  # collector/ -> workspace/
+WORKSPACE_DIR = Path(__file__).resolve().parent.parent  # lib/ -> workspace/
 REPORTS_DIR = WORKSPACE_DIR / "reports"
 ALL_URLS_FILE = REPORTS_DIR / "_index" / "all_urls.tsv"
 
@@ -65,39 +65,96 @@ def _source_quality_score(domain: str) -> int:
     return 0
 
 
+def _fetch_curate_recent(days: int = 3) -> list[dict]:
+    """Fetch recently collected materials from platform/curate/ (new architecture).
+
+    Returns list of {url, line, status} with validated content.
+    Filters for known high-value sources.
+    """
+    curate_dir = WORKSPACE_DIR / "platform" / "curate"
+    if not curate_dir.exists():
+        return []
+
+    # Determine cut-off date
+    today = datetime.date.today()
+    cut_off = (today - datetime.timedelta(days=days)).isoformat()
+
+    items = []
+    seen_urls = set()
+    for mat_file in sorted(curate_dir.rglob("materials.json"), reverse=True):
+        dpart = mat_file.parent.name  # YYYY-MM-DD
+        if dpart < cut_off:
+            break
+        try:
+            with open(mat_file) as f:
+                materials = json.load(f)
+        except Exception:
+            continue
+        for item in materials:
+            url = (item.get("canonical_url") or item.get("url") or "").rstrip("/")
+            if not url or url in seen_urls:
+                continue
+            ct = item.get("content_text") or item.get("summary") or ""
+            if len(ct) < MIN_CONTENT_CHARS:
+                continue
+            seen_urls.add(url)
+            items.append({
+                "url": url,
+                "line": f"{url}\tcollected\t{dpart}",
+                "status": "collected",
+            })
+
+    return items
+
+
 def get_all_collected_urls(validate_content: bool = True) -> list[dict]:
     """Read all_urls.tsv and return list of {url, line} for items with 'collected' status.
 
     When validate_content=True, only includes URLs whose saved Markdown file
-    has substantive content (≥MIN_CONTENT_CHARS).
+    or platform/curate/ entry has substantive content (≥MIN_CONTENT_CHARS).
+
+    Falls back to platform/curate/ (new architecture) for recent materials
+    not yet recorded in all_urls.tsv.
 
     Results are sorted by source quality (descending):
     ranking_report > consulting_reports > quizzes > blog > newsletters > other.
     """
     items = []
-    if not ALL_URLS_FILE.exists():
-        print(f"⚠️ all_urls.tsv not found: {ALL_URLS_FILE}")
-        return []
+    seen_urls = set()
 
-    with open(ALL_URLS_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            if len(parts) >= 2 and parts[1] in ("collected", "unknown"):
-                url = parts[0]
-                # ── Content validation guard ──
-                if validate_content:
-                    content = read_material_content(url)
-                    if not content:
+    # ── Phase 1: from all_urls.tsv (traditional source) ──
+    if ALL_URLS_FILE.exists():
+        with open(ALL_URLS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 2 and parts[1] in ("collected", "unknown"):
+                    url = parts[0].rstrip("/")
+                    if url in seen_urls:
                         continue
+                    seen_urls.add(url)
 
-                items.append({
-                    "url": url,
-                    "line": line,
-                    "status": "collected",
-                })
+                    # ── Content validation guard ──
+                    if validate_content:
+                        content = read_material_content(url)
+                        if not content:
+                            continue
+
+                    items.append({
+                        "url": url,
+                        "line": line,
+                        "status": "collected",
+                    })
+
+    # ── Phase 2: supplement from platform/curate/ (always include) ──
+    # Ensure recent high-quality materials are included even if not yet in all_urls.tsv
+    curate_items = _fetch_curate_recent(days=7)
+    for ci in curate_items:
+        if ci["url"] not in seen_urls:
+            seen_urls.add(ci["url"])
+            items.append(ci)
 
     # Sort by source quality score (descending)
     for m in items:
@@ -129,33 +186,59 @@ def find_report_file(url: str) -> Optional[Path]:
 MIN_CONTENT_CHARS = 300
 
 
+def _read_curate_content(url: str, url_stripped: str, min_chars: int = MIN_CONTENT_CHARS) -> Optional[str]:
+    """Fallback: search platform/curate/ for content (new architecture)."""
+    curate_dir = WORKSPACE_DIR / "platform" / "curate"
+    if not curate_dir.exists():
+        return None
+    for mat_file in sorted(curate_dir.rglob("materials.json"), reverse=True):
+        try:
+            with open(mat_file) as f:
+                materials = json.load(f)
+            for item in materials:
+                u = item.get("canonical_url") or item.get("url") or ""
+                if u.rstrip("/") == url_stripped or u.rstrip("/") == url.rstrip("/"):
+                    ct = item.get("content_text") or item.get("summary") or ""
+                    if len(ct) >= min_chars:
+                        return ct
+                    break
+        except Exception:
+            continue
+    return None
+
+
 def read_material_content(url: str, min_chars: int = MIN_CONTENT_CHARS) -> Optional[str]:
     """Read the content of a material from its saved Markdown file.
+
+    First tries reports/ (old architecture), then falls back to
+    platform/curate/ (new architecture).
 
     Returns None if: file not found, content is below min_chars threshold,
     or content looks like an empty stub ("No content available").
     """
+    url_stripped = url.strip().rstrip("/")
     md_file = find_report_file(url)
-    if not md_file:
-        return None
+    if md_file:
+        content = md_file.read_text(encoding="utf-8", errors="replace")
+        # Remove front matter (--- block)
+        content = re.sub(r'^---\n.*?\n---\n', '', content, flags=re.DOTALL)
+        # Remove trailing "Collected by" line
+        content = re.sub(r'\n---\n\n\*Collected by.*?\*$', '', content, flags=re.DOTALL)
+        content = content.strip()
 
-    content = md_file.read_text(encoding="utf-8", errors="replace")
-    # Remove front matter (--- block)
-    content = re.sub(r'^---\n.*?\n---\n', '', content, flags=re.DOTALL)
-    # Remove trailing "Collected by" line
-    content = re.sub(r'\n---\n\n\*Collected by.*?\*$', '', content, flags=re.DOTALL)
-    content = content.strip()
+        # ── Content size guard ──
+        if len(content) < min_chars:
+            return None
 
-    # ── Content size guard ──
-    if len(content) < min_chars:
-        return None
+        # ── Stub guard: content that is just a placeholder string ──
+        stub_patterns = ["No content available", "No summary available"]
+        if content.strip() in stub_patterns or any(p == content.strip() for p in stub_patterns):
+            return None
 
-    # ── Stub guard: content that is just a placeholder string ──
-    stub_patterns = ["No content available", "No summary available"]
-    if content.strip() in stub_patterns or any(p == content.strip() for p in stub_patterns):
-        return None
+        return content
 
-    return content
+    # -- Fallback: platform/curate/ (new architecture) --
+    return _read_curate_content(url, url_stripped, min_chars)
 
 
 def score_material(m: dict) -> int:
@@ -207,7 +290,7 @@ def score_material(m: dict) -> int:
 
 # ── Recent article tracking (diversity boost) ──
 # Path to recent article log (written by write_article.py on each run)
-RECENT_ARTICLES_FILE = Path(__file__).resolve().parent.parent.parent / "wechat-articles" / "_recent_topics.json"
+RECENT_ARTICLES_FILE = WORKSPACE_DIR / "wechat-articles" / "_recent_topics.json"
 
 # Keywords that have been heavily used in recent articles —
 # materials whose titles/content overlap these will be penalized in scoring
@@ -285,7 +368,7 @@ def _load_material_tags() -> dict:
     """Load LLM-tag data from _material_tags.json.
     Returns dict: url -> {title, tags: {dim: tag}, key_signal, tagged_at}
     """
-    tags_file = Path(__file__).resolve().parent.parent.parent / "wechat-articles" / "_material_tags.json"
+    tags_file = WORKSPACE_DIR / "wechat-articles" / "_material_tags.json"
     if tags_file.exists():
         try:
             return json.loads(tags_file.read_text(encoding="utf-8"))
@@ -402,23 +485,27 @@ def _cluster_materials_by_topic(materials: list[dict]) -> dict[str, list[dict]]:
 
     # Build result dict with readable labels
     result: dict[str, list[dict]] = {}
-    seen_labels: dict[str, int] = {}
     for cluster in clusters_raw:
         anchor_tags = cluster[0][1]
-        # Use topic_focus as primary label
-        label = anchor_tags.get("topic_focus", "其他")
-        # Add content_form as disambiguation
-        suffix = ""
-        if label in result:
-            suffix = f" / {anchor_tags.get('content_form', '')}"
-            label_candidate = label + suffix
-            if label_candidate in result:
-                # Still colliding — add perspective
-                suffix = f" / {anchor_tags.get('perspective', '')}"
-                label = label + suffix
+        # Use topic_focus as primary label (may be list or string)
+        raw_label = anchor_tags.get("topic_focus", "其他")
+        if isinstance(raw_label, list):
+            label = raw_label[0] if raw_label else "其他"
+        else:
+            label = str(raw_label) if raw_label else "其他"
+        # Deduplicate labels
+        candidate = label
+        disambig_idx = 1
+        while candidate in result:
+            suffix = anchor_tags.get("content_form", "")
+            if isinstance(suffix, list):
+                suffix = suffix[0] if suffix else ""
+            if suffix:
+                candidate = f"{label} / {suffix}"
             else:
-                label = label_candidate
-        result[label] = [m for m, _ in cluster]
+                candidate = f"{label} ({disambig_idx})"
+            disambig_idx += 1
+        result[candidate] = [m for m, _ in cluster]
 
     if untagged:
         result["其他"] = untagged
@@ -531,27 +618,17 @@ def _pick_best_cluster(clusters: dict[str, list[dict]], max_count: int = 5) -> l
     selected = list(best_items)
     used_urls = {m.get("url", "") for m in selected}
 
-    # ── Signal-borrow: if best cluster has < 2 signal items, borrow from next best ──
-    if len(cluster_rankings) > 1:
-        best_signal_count = _count_signals_in_cluster(selected, signals_db)
-        if best_signal_count < 2:
-            # Find next cluster with the most signals not already used
-            signals_needed = min(3 - best_signal_count, max_count - len(selected))
-            for signal_count, avg_score, label, items in cluster_rankings[1:]:
-                if signals_needed <= 0:
-                    break
-                borrowed = []
-                for m in items:
-                    url = (m.get("url", "") or "").rstrip("/")
-                    if url in used_urls:
-                        continue
-                    if url in signals_db and signals_needed > 0:
-                        borrowed.append(m)
-                        used_urls.add(url)
-                        signals_needed -= 1
-                if borrowed:
-                    selected.extend(borrowed)
-                    print(f"     📎 Borrowed {len(borrowed)} signal items from '{label}'")
+    # ── Cross-cluster signal-borrow: DISABLED (公众号文章质量修复方案 4.2) ──
+    # One article == one core thesis. We no longer merge in signal materials from
+    # other clusters just because the best cluster has few key_signals — that
+    # produced cross-topic concatenation. If the best cluster is too thin to
+    # support depth, we keep it as-is below the coherence threshold and let the
+    # caller / quality gate flag "证据不足 / 不建议成文".
+    best_signal_count = _count_signals_in_cluster(selected, signals_db)
+    if best_signal_count < 2 and len(selected) >= 1:
+        print(f"  ⚠️ Best cluster has only {best_signal_count} key_signal — "
+              f"NOT borrowing from other clusters (single-thesis rule). "
+              f"May be flagged as 证据不足 later.")
 
     # ── Deduplicate by domain ──
     seen_domains: dict[str, int] = {}
@@ -622,7 +699,7 @@ def sample_materials(materials: list[dict], max_count: int = 5) -> list[dict]:
         return []
 
     # ── Exclude recently used URLs (past 3 days) ──
-    recent_topics_file = Path(__file__).resolve().parent.parent.parent / "wechat-articles" / "_recent_topics.json"
+    recent_topics_file = WORKSPACE_DIR / "wechat-articles" / "_recent_topics.json"
     recently_used_urls = set()
     if recent_topics_file.exists():
         try:
@@ -695,9 +772,14 @@ def sample_materials(materials: list[dict], max_count: int = 5) -> list[dict]:
                 continue
             print(f"       • {s.get('url','')[:80]}")
     else:
-        print("  ❌ Could not build a coherent cluster.")
-        # Absolute fallback: sort by score, top N
-        materials.sort(key=lambda x: x.get("score", 0), reverse=True)
-        selected = materials[:max_count]
+        # 公众号文章质量修复方案 4.2：不跨主题拼接。
+        # 单一聚类不足以支撑深度时，输出"不建议成文/需要补充素材"，
+        # 而不是用不同主题的高分素材强行捏合成一篇。
+        print("  ❌ Could not build a coherent themed cluster (single-thesis rule).")
+        print("     ⛔ Proceeding WITHOUT cross-theme concatenation.")
+        print("     ⛔ Result: 不建议成文 / 需要补充同一论点的素材。")
+        print("     ⛔ Returning empty sample so the caller aborts the write "
+              "(no fabricated or stitched article).")
+        selected = []
 
     return selected[:max_count]

@@ -16,7 +16,7 @@ RSS_FEEDS = None
 RSS_FEED_TIMEOUT_SECONDS = 5
 ARTICLE_PAGE_TIMEOUT_SECONDS = 5
 ARTICLE_SUMMARY_MAX_CHARS = 4000
-MAX_ITEMS_PER_FEED = 3
+MAX_ITEMS_PER_FEED = 3  # default; per-source feeds override via priority
 MAX_RSS_LOADER_SECONDS = 20
 
 
@@ -24,7 +24,13 @@ def _get_rss_feeds() -> list[dict]:
     if RSS_FEEDS is not None:
         return RSS_FEEDS
     try:
-        return get_sources("rss")
+        feeds = get_sources("rss")
+        # Apply priority-based max_items
+        for feed in feeds:
+            if "max_items" not in feed:
+                p = feed.get("priority", "medium")
+                feed["max_items"] = {"core": 5, "high": 5, "medium": 3}.get(p, 3)
+        return feeds
     except (ModuleNotFoundError, FileNotFoundError):
         return []
 
@@ -69,7 +75,8 @@ def load_rss_materials(date_str: str) -> list[dict]:
             break
         source_name = feed["name"]
         source_url = feed["url"]
-        for item in fetch_rss(source_url)[:MAX_ITEMS_PER_FEED]:
+        feed_max = feed.get("max_items", MAX_ITEMS_PER_FEED)
+        for item in fetch_rss(source_url)[:feed_max]:
             if time.monotonic() - started_at >= MAX_RSS_LOADER_SECONDS:
                 break
             item_url = item.get("url", "").strip()

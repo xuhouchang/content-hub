@@ -35,7 +35,7 @@ def _llm_judge_topic_similar(
     new_title: str,
     new_digest: Optional[str],
     recent_topics: list[dict],
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
 ) -> bool:
     """Ask LLM whether new_title+new_digest is too similar to any recent topic.
 
@@ -82,6 +82,12 @@ def _llm_judge_topic_similar(
         {"role": "user", "content": prompt},
     ]
     resp = call_model(messages, model=model, temperature=0.1, max_tokens=50)
+    # Defensive: call_model may return None on empty content / retry exhaustion.
+    # Never call .strip() on a None — return a conservative verdict instead.
+    if resp is None or not resp.strip():
+        print("  ⚠️ LLM topic check returned empty/None; treating as DISTINCT "
+              "(URL/title dedup already applied)")
+        return False
     cleaned = re.sub(r"[^A-Z]", "", resp.strip().upper())
     return "SIMILAR" in cleaned
 
@@ -99,7 +105,7 @@ def pick_top_n_clusters(
     candidates: list[dict],
     n: int = 2,
     topic_diversity_days: int = 7,
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
 ) -> list[dict]:
     """Pick the top N cluster leaders, filtering out topics similar to recent articles.
 

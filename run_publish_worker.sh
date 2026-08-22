@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
-# Publish worker safety-net wrapper (Stage B of the decoupled pipeline).
-#
-# write_article.py auto-launches publish_worker.py in the background after each
-# successful write, but a separate cron entry here guarantees delivery even if
-# that background process dies. Schedule it ~90 min after the article job:
-#
-#   30 7 * * *  cd /path/to/content-hub && ./run_publish_worker.sh >> logs/publish_$(date +\%Y-\%m-\%d).log 2>&1
-#
+# Independently scheduled Stage B worker. Safe to run every five minutes:
+# empty passes are silent and a non-blocking worker lock prevents overlap.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -17,19 +12,8 @@ else
   PYTHON="${PYTHON:-python3}"
 fi
 DATE="${DATE:-$(date +%Y-%m-%d)}"
-LOG_DIR="${SCRIPT_DIR}/logs"
-LOG_FILE="${LOG_DIR}/publish_${DATE}.log"
+LOG_DIR="$SCRIPT_DIR/logs"
+LOG_FILE="$LOG_DIR/publish_${DATE}.log"
 
 mkdir -p "$LOG_DIR"
-exec > >(tee -a "$LOG_FILE") 2>&1
-
-echo "=========================================="
-echo "Publish Worker (safety net) — $DATE"
-echo "=========================================="
-
-"$PYTHON" "$SCRIPT_DIR/publish_worker.py" --once
-
-echo "=========================================="
-echo "Publish worker pass complete"
-echo "Log: $LOG_FILE"
-echo "=========================================="
+"$PYTHON" "$SCRIPT_DIR/publish_worker.py" --once --quiet-empty >> "$LOG_FILE" 2>&1

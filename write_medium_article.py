@@ -17,7 +17,6 @@ Usage:
 import argparse
 import datetime
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -79,7 +78,6 @@ def filter_sensitive(materials: list[dict]) -> list[dict]:
 
 # ── Paths ──
 WORKSPACE_DIR = Path(__file__).resolve().parent
-COLLECTOR_DIR = WORKSPACE_DIR / "collector"
 REPORTS_DIR = WORKSPACE_DIR / "reports"
 ALL_URLS_FILE = REPORTS_DIR / "_index" / "all_urls.tsv"
 OUTPUT_BASE = WORKSPACE_DIR / "medium-articles"
@@ -407,7 +405,7 @@ Length: 800-2000 words. Tight is better.
         {"role": "user", "content": user_prompt},
     ]
 
-    response = call_model(messages, temperature=0.9, max_tokens=4096, model=model)
+    response = call_model(messages, temperature=0.9, max_tokens=None, model=model)
     if not response:
         print("  ❌ Model returned no response")
         return None

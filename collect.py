@@ -142,9 +142,45 @@ EXTERNAL_SOURCES = [
         "description": "AI agent deployment case studies with consulting frameworks.",
         "topics": ["ai-agent", "retail", "case-study"],
     },
+    # ── AI 工程 / 产品 / 真实应用案例源（补充企业落地与工程信源，降低咨询/治理主导）──
+    {
+        "name": "Depth AI (depth.ai blog)",
+        "url": "https://depth.ai/blog",
+        "type": "blog",
+        "language": "en",
+        "description": "AI applied engineering & product case studies with real deployment detail.",
+        "topics": ["ai-engineering", "product", "case-study"],
+    },
+    {
+        "name": "Cursor / AI Engineers customer blog",
+        "url": "https://www.cursor.com/blog",
+        "type": "blog",
+        "language": "en",
+        "description": "AI-assist engineering & product delivery stories in real orgs.",
+        "topics": ["ai-engineering", "product", "workflow"],
+    },
+    {
+        "name": "Maven blog (AI product ops)",
+        "url": "https://www.mavenhq.com/blog",
+        "type": "blog",
+        "language": "en",
+        "description": "Measurable AI product/process deployment results in enterprise ops.",
+        "topics": ["ai-product", "process", "metrics"],
+    },
+    {
+        "name": "Ramp AI engineering blog",
+        "url": "https://www.ramp.com/blog/engineering",
+        "type": "blog",
+        "language": "en",
+        "description": "Real LLM/agent engineering posts with measurable production outcomes.",
+        "topics": ["ai-engineering", "agent", "production"],
+    },
 ]
 
 # Pre-configured search queries for case discovery
+# 偏重「真实工作场景 / 流程改造 / 业务结果 / 实施数据 / 可复现步骤」，
+# 并引入 AI 工程（engineering）、产品（product）与真实应用案例信源，
+# 减少咨询/治理类纯框架内容对素材的过度主导。
 CASE_SEARCH_QUERIES = [
     "enterprise AI agent production deployment results automation rate ROI case study",
     "AI implementation case study company results metrics deployment 2025",
@@ -153,6 +189,10 @@ CASE_SEARCH_QUERIES = [
     "AI transforming business process case study quantified results",
     "company built AI assistant replaced manual process efficiency gains",
     "enterprise AI adoption real world story with numbers and timeline",
+    "AI engineering team production workflow LLM application metrics",
+    "AI product team shipped internal copilot adoption measured outcomes",
+    "LLM app in production engineering retrospective lessons learned",
+    "AI agent workflow automation business process real deployment data",
 ]
 
 
@@ -293,10 +333,12 @@ def cmd_search(query: str, args) -> int:
         if not url_str or not content or len(content) < 200:
             continue
         
-        # Quality scoring
+        # Quality scoring — favor real-world engineering/business results,
+        # not pure governance/policy wording.
         score = 0
-        for kw in ["production", "results", "deployment", "%", "metrics", "implemented", 
-                    "enterprise", "revenue", "automated", "cost savings", "accuracy"]:
+        for kw in ["production", "deployment", "%", "metrics", "implemented",
+                    "revenue", "automated", "cost savings", "accuracy", "workflow",
+                    "case study", "roi", "handle time", "deflection"]:
             if kw in content.lower():
                 score += 1
         
@@ -513,11 +555,11 @@ def _search_cases(query: str, max_results: int = 10) -> list[dict]:
         if not url_str or not content or len(content) < 200:
             continue
         
-        # Score by keyword density
+        # Score by keyword density — favor real engineering/business results.
         score = sum(1 for kw in [
-            "production", "results", "deployment", "%", "metrics",
-            "implemented", "enterprise", "revenue", "automated",
-            "cost savings", "accuracy", "company",
+            "production", "deployment", "%", "metrics",
+            "implemented", "revenue", "automated",
+            "cost savings", "accuracy", "workflow", "roi", "case study",
         ] if kw in content.lower())
         
         results.append({

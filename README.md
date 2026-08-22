@@ -35,7 +35,9 @@ python3 platform_cli.py run cleanup --date 2026-06-03
 
 ```
 cron 05:00 → run_all.sh              ← 唤醒 collect-daily + cleanup
-cron 06:00 → run_daily_article.sh    ← 唤醒 article-daily + case-daily
+cron 06:00 → run_daily_full.sh       ← article-daily + Medium
+cron */5  → run_publish_worker.sh    ← 独立消费公众号草稿队列
+cron 10:00 → run_daily_case.sh       ← 只运行 case-daily
 ```
 
 ## 平台目录
@@ -55,7 +57,10 @@ platform/
 ```
 collector/
 ├── run_all.sh                  # 总管线入口（cron 05:00）
-├── run_daily_article.sh        # 每日文章生成管线入口（cron 06:00）
+├── run_daily_full.sh           # 每日文章 + Medium（cron 06:00）
+├── run_daily_article.sh        # 仅文章生成入口（手动/备用）
+├── run_daily_case.sh           # 仅案例拆解入口（cron 10:00）
+├── run_publish_worker.sh       # 独立草稿发布 worker（cron 每5分钟）
 ├── run_wechat_stats.sh         # 数据分析管线（手动触发）
 │
 ├── collect.py                  # 统一CLI（可替代各collect_*.py独立调用）
@@ -71,9 +76,9 @@ collector/
 ├── write_article.py            # 公众号文章写作（Phase 1）
 ├── embed_images.py             # IMAGE占位符替换（Phase 2 fallback）
 ├── generate_cover.py           # 文章封面图生成（Pexels搜索+裁剪）
-├── image_search.py             # Pexels/Pixabay图片搜索下载
+├── image_search.py             # Pexels/Pixabay图片搜索下载（Pexels主+Pixabay备选）
+├── lib/pexels_images.py        # 正文配图「Pexels-first」可复用模块（检索+下载+尺寸归一化）
 ├── wechat_publish.py           # 微信公众号发布器（含Markdown→HTML转码）
-├── publish_wechat.py           # 旧的发布脚本（已迁移到wechat_publish.py）
 │
 ├── decompose_case_study.py     # 每日案例拆解管线
 ├── synthesize_weekly.py        # 周报合成（替代weekly-synthesis skill）
@@ -132,6 +137,7 @@ collector/
 | `write_article.py` | 公众号文章全流程：选题判断 → 推理链 → 正文写作 → 配图匹配 → 输出到 wechat-articles/ |
 | `embed_images.py` | IMAGE占位符替换：将 `<!-- IMAGE: N -->` 替换为 `![alt](./images/image-NNN.jpg)` |
 | `image_search.py` | 图片搜索：Pexels（主）+ Pixabay（备选）搜索并下载配图 |
+| `lib/pexels_images.py` | 正文配图「Pexels-first」可复用模块：`resolve_image()` 按 已有图→Pexels→(仅显式允许时)生成式 解析并做尺寸/格式归一化 |
 | `generate_cover.py` | 封面图生成：搜索Pexels → 下载 → 裁剪为2.35:1（文章顶部）和1:1（列表缩略图） |
 | `polish_article.py` | 文章润色：LLM驱动的语言优化 |
 | `synthesize_weekly.py` | 周报合成：读取7天素材 → 主题聚类 → 写全文 → 配图 → 发布 |
@@ -142,7 +148,6 @@ collector/
 | 脚本 | 功能 |
 |------|------|
 | `wechat_publish.py` | 微信公众号完整发布器：上传图片（永久素材/临时素材） → Markdown转WeChat HTML → 创建草稿 → 可选发布。支持永久封面图复用 |
-| `publish_wechat.py` | 早期发布脚本（简化版，逐步迁移中） |
 
 ### 案例拆解
 
@@ -205,10 +210,10 @@ run_all.sh
 
 ### 每日文章管线 (cron 06:00)
 
-> **架构说明（2026-07-09 重构）**：写作与发布已**解耦为两个异步阶段**。
-> `write_article.py` 只负责产出文章并入队（`queue/pending.jsonl`），随后在后台
-> 触发发布 worker；发布由独立的 `publish_worker.py` 进程消费队列完成（仅建草稿，
-> 不自动群发，保留人工审稿闸门）。两者互不阻塞，发布超时不会再拖垮写作。
+> **架构说明（2026-08-03 修订）**：写作与发布是两个独立调度阶段。
+> `write_article.py` 与 `decompose_case_study.py` 只负责产出并写入
+> `queue/pending.jsonl`，绝不自行启动 sender。cron 每 5 分钟独立运行
+> `publish_worker.py` 创建草稿，不自动群发，保留人工审稿闸门。
 
 ```
 run_daily_article.sh
@@ -222,9 +227,9 @@ run_daily_article.sh
 │       ├── 正文写作
 │       ├── 配图匹配下载（image_search.py，无图时回退 assets/placeholder.jpg）
 │       ├── 图片嵌入 (embed_images.py)
-│       └── 入队 queue/pending.jsonl + 后台触发 publish_worker.py
+│       └── 入队 queue/pending.jsonl 后退出
 │
-└── Stage B：发布（独立进程 publish_worker.py，可后台触发或 cron 安全网）
+└── Stage B：发布（独立 cron，每 5 分钟）
     └── publish_worker.py --once
         └── wechat_publish.py --article article.md --images-dir images/   (无 --publish ⇒ 仅建草稿)
             ├── 并发上传正文图片（单图失败跳过，不崩溃）
@@ -233,8 +238,9 @@ run_daily_article.sh
             └── 创建草稿 (draft/add)
 ```
 
-> cron 07:30 另有 `run_publish_worker.sh`（调用 `publish_worker.py --once`）作为安全网，
-> 即使后台触发进程异常退出也能补发。队列状态见 `queue/pending.jsonl` / `done.jsonl` / `failed.jsonl`。
+> 队列写入和 worker 迁移记录都受文件锁保护；失败会按 5/10 分钟退避重试，
+> 三次失败后进入 `failed.jsonl`。队列状态见 `pending.jsonl`、`processing.jsonl`、
+> `done.jsonl` 与 `failed.jsonl`。
 
 ### 每日案例拆解 (cron 10:00)
 
@@ -244,7 +250,8 @@ decompose_case_study.py --external
 ├── 多信源交叉验证
 ├── 写作（CASE_STUDY_PROMPT）
 ├── 配图（image_search.py）
-├── 发布（wechat_publish.py）
+├── 入队（publish_queue.py）
+└── 独立 worker 创建微信草稿
 └── 保存到 wechat-articles/
 ```
 
@@ -320,11 +327,11 @@ python3 write_article.py --dry-run
 # 每日公众号文章 — 每天06:00
 0 6 * * * cd /path/to/collector && bash run_daily_article.sh
 
-# 发布安全网（异步解耦）— 每天07:30 消费发布队列，补发后台触发未完成的草稿
-30 7 * * * cd /path/to/collector && bash run_publish_worker.sh
+# 独立发布阶段 — 每5分钟消费队列，空队列静默
+*/5 * * * * cd /path/to/collector && bash run_publish_worker.sh
 
-# 每日案例拆解 — 每天10:00（工作日）
-0 10 * * 1-5 cd /path/to/collector && python3 decompose_case_study.py --external
+# 每日案例拆解 — 每天10:00，只运行 case-daily
+0 10 * * * cd /path/to/collector && bash run_daily_case.sh
 ```
 
 ## 注意事项

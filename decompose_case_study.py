@@ -15,7 +15,7 @@ Pipeline steps:
   3. Polish — polish_article.py
   4. Search images — image_search.py
   5. Embed images — embed_images.py
-  6. Publish — wechat_publish.py (optional)
+  6. Enqueue — publish_queue.py（由独立 worker 创建微信草稿）
 
 Usage:
   python3 decompose_case_study.py [--date YYYY-MM-DD] [--dry-run] [--materials /path/to/search-results.json]
@@ -25,15 +25,11 @@ Usage:
 """
 
 import argparse
-import datetime
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import time
-import urllib.parse
 from pathlib import Path
 from typing import Optional
 
@@ -54,7 +50,7 @@ if dotenv_path.exists():
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib import get_date_str
-from lib.materials import get_all_collected_urls, read_material_content
+from lib.materials import get_all_collected_urls
 from lib.llm import call_model
 from lib.models import get_model
 WORKSPACE_DIR = COLLECTOR_DIR.parent
@@ -303,8 +299,7 @@ def strip_digest(text: str) -> str:
 
 
 def fetch_url_content(url: str, timeout: int = 15) -> Optional[str]:
-    """Fetch URL content using web_fetch (via subprocess). Falls back to requests."""
-    import subprocess
+    """Fetch URL content with requests and return lightly stripped text."""
     try:
         # Try python requests first
         import requests
@@ -316,7 +311,6 @@ def fetch_url_content(url: str, timeout: int = 15) -> Optional[str]:
         if resp.status_code == 200:
             content = resp.text
             # Simple text extraction: strip HTML tags
-            import html
             text = re.sub(r'<[^>]+>', ' ', content)
             text = re.sub(r'\s+', ' ', text).strip()
             return text[:15000]
@@ -474,134 +468,6 @@ def _load_used_external_urls() -> set:
             if url and not _is_generic_domain(url):
                 used.add(url)
     return used
-
-
-def _publish_to_wechat_draft(out_dir: str, date_str: str) -> bool:
-    """Publish case study article as a WeChat draft."""
-    import requests
-    out_path = Path(out_dir)
-    md_path = out_path / "article.md"
-    img_dir = out_path / "images"
-    if not md_path.exists():
-        print(f"  ❌ Article not found for publishing: {md_path}")
-        return False
-
-    md_text = md_path.read_text(encoding="utf-8")
-
-    # Load meta.json for title/digest
-    meta_path = out_path / "meta.json"
-    meta_data = {}
-    if meta_path.exists():
-        try:
-            meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    # Title: prefer meta.json title, then first non-H1 line of body
-    title = meta_data.get("title", "")
-    if not title:
-        first_line = md_text.split("\n")[0].strip().lstrip("# ").strip()
-        title = first_line[:60] if first_line else f"案例拆解 {date_str}"
-
-    # Digest: prefer meta.json, then extract_digest, then first paragraph
-    digest = meta_data.get("digest", "")
-    if not digest:
-        digest = extract_digest(md_text)
-    if not digest:
-        first_para = md_text.split("\n\n")[1] if len(md_text.split("\n\n")) > 1 else ""
-        digest = first_para.strip().replace("\n", " ")[:60]
-
-    # Import WeChat publisher with purple theme
-    sys.path.insert(0, str(Path(__file__).parent))
-    from wechat_publish import WeChatPublisher
-
-    # Load env
-    env_path = Path(__file__).parent / ".env"
-    if env_path.exists():
-        with open(env_path) as _f:
-            for _line in _f:
-                _line = _line.strip()
-                if _line and "=" in _line and not _line.startswith("#"):
-                    _k, _v = _line.split("=", 1)
-                    _v = _v.strip().strip("\"'").strip()
-                    if _v and not os.environ.get(_k.strip()):
-                        os.environ[_k.strip()] = _v
-
-    app_id = os.environ.get("WECHAT_APP_ID", "")
-    app_secret = os.environ.get("WECHAT_APP_SECRET", "")
-    if not app_id or not app_secret:
-        print("  ❌ WeChat credentials not found")
-        return False
-
-    print(f"\n📤 Publishing case study to WeChat draft...")
-    publisher = WeChatPublisher(app_id, app_secret)
-
-    # Upload article images and replace in markdown with WeChat CDN URLs
-    article_md = md_text
-    uploads = publisher.upload_article_images_as_urls(str(img_dir))
-
-    def _replace_img(m):
-        basename = os.path.basename(m.group(2))
-        url = uploads.get(basename)
-        if url:
-            return f'![{m.group(1)}]({url})'
-        return m.group(0)
-    article_md = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', _replace_img, article_md)
-
-    # Strip backticks wrapping ![]() image lines (prevent them from being <code>)
-    article_md = re.sub(r'^`(!\[[^\]]*\]\([^)]+\))`\s*$', r'\1', article_md, flags=re.MULTILINE)
-
-    # Convert with purple theme (handles tables, headings, lists)
-    html_content = publisher._markdown_to_wechat_html(article_md)
-
-    # Truncate title to WeChat limits (keep under 85 bytes for CJK titles)
-    while len(title.encode('utf-8')) > 85:
-        title = title[:-1]
-
-    # Upload cover as thumb
-    cover_path = None
-    for candidate in ["cover-1x1.jpg", "cover-wide.jpg"]:
-        p = img_dir / candidate
-        if p.exists():
-            cover_path = p
-            break
-    if not cover_path:
-        image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
-        imgs = [p for p in img_dir.iterdir() if p.suffix.lower() in image_exts]
-        cover_path = imgs[0] if imgs else None
-
-    thumb_media_id = ""
-    if cover_path:
-        try:
-            from PIL import Image as PILImage
-            thumb_path = img_dir / "cover_thumb.jpg"
-            im = PILImage.open(str(cover_path)).convert('RGB')
-            sz = min(im.size)
-            im = im.crop(((im.width - sz)//2, (im.height - sz)//2, (im.width + sz)//2, (im.height + sz)//2))
-            im = im.resize((300, 300), PILImage.LANCZOS)
-            im.save(thumb_path, 'JPEG', quality=85)
-            thumb_media_id = publisher.upload_image(str(thumb_path))
-            if thumb_media_id:
-                print(f"  Cover thumb uploaded: {thumb_media_id[:20]}...")
-            else:
-                print(f"  ⚠️ Cover upload returned empty media_id")
-        except Exception as e:
-            print(f"  ⚠️ Cover thumb upload failed ({e})")
-    else:
-        print("  ⚠️ No cover image found")
-
-    # Create draft via publisher (handles encoding correctly)
-    try:
-        media_id = publisher.create_draft({
-            'title': title,
-            'digest': digest,
-            'content': html_content,
-        }, thumb_media_id)
-        print(f'  ✅ Draft created: {media_id}')
-        return True
-    except Exception as e:
-        print(f'  ❌ Draft creation failed: {e}')
-        return False
 
 
 def _mark_external_url_used(url: str):
@@ -778,7 +644,7 @@ def write_case(
     ]
 
     print(f"\n5️⃣  Calling LLM for case writing ({CASE_WRITING_MODEL})...")
-    response = call_model(messages, temperature=0.7, max_tokens=8192, model=CASE_WRITING_MODEL)
+    response = call_model(messages, temperature=0.7, max_tokens=None, model=CASE_WRITING_MODEL)
     if not response:
         print("  ❌ Model returned no response")
         return None
@@ -1099,10 +965,20 @@ def main():
         print("  ❌ Case writing failed")
         return 1
 
-    # ── Steps 4-6: Post-process + Publish ──
+    # ── Steps 4-6: Post-process + enqueue ──
     if not args.dry_run:
         post_process(out_dir)
-        _publish_to_wechat_draft(out_dir, date_str)
+        meta_path = Path(out_dir) / "meta.json"
+        digest = ""
+        if meta_path.exists():
+            try:
+                digest = json.loads(meta_path.read_text(encoding="utf-8")).get("digest", "")
+            except (json.JSONDecodeError, OSError):
+                pass
+        from publish_queue import enqueue_for_publish
+
+        if enqueue_for_publish(out_dir, digest):
+            print("  📋 Case study queued for independent draft publishing")
 
     print(f"\n{'=' * 60}")
     print("✅ Case study complete!")

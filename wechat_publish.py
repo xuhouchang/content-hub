@@ -352,7 +352,9 @@ class WeChatPublisher:
             # ── Image ──
             img_match = re.match(r'^!\[([^\]]*)\]\(([^)]+)\)$', stripped)
             if img_match:
-                sections.append(f'<p style="margin: 24px 0;"><img src="{img_match.group(2)}" alt="{img_match.group(1)}" style="max-width: 100%;"/></p>')
+                src = img_match.group(2)
+                alt = img_match.group(1)
+                sections.append(f'<img data-src="{src}" src="{src}" alt="{alt}" style="max-width: 100%; display: block; margin: 24px auto;" />')
                 i += 1
                 continue
 
@@ -593,9 +595,9 @@ def main():
     COVER_NAMES = {"cover-1x1.jpg", "cover-1x1.png", "cover-wide.jpg", "cover-wide.png"}
     for cover_name in COVER_NAMES:
         article["content"] = re.sub(
-            r'<p style="margin: 24px 0;"><img src="[^"]*'
+            r'<img[^>]*src="[^"]*'
             + re.escape(cover_name)
-            + r'[^"]*"[^>]*></p>',
+            + r'[^"]*"[^>]*/?>',
             "",
             article["content"],
         )

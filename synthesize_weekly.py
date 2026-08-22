@@ -66,13 +66,14 @@ except ImportError:
 - 核心：多篇素材找到共同趋势，而不是拼凑多篇素材的摘要
 
 ## 选题筛选标准
-1. 优先选择有2篇以上素材交叉验证的主题
+1. 优先选择有2篇以上素材交叉验证、且锚定「企业AI应用落地」的主题
 2. 同一现象/趋势被不同来源提到 → 优先
-3. 有数据支撑的互证观点 → 优先
+3. 有数据支撑的互证观点 → 优先（落地证据：真实工作场景/流程改造/岗位变化/业务结果/实施数据/可复现步骤）
 4. 不同角度的同一问题分析 → 优先
 5. 纯产品发布/模型评测 → 排除
 6. 缺乏企业视角的纯学术讨论 → 排除
-7. 只有一篇素材且无交叉验证 → 排除
+7. 纯治理/风险/安全/对齐话题，若通篇只是框架/政策而无企业落地证据 → 低优先，不作选题主轴
+8. 只有一篇素材且无交叉验证 → 排除
 
 ## 写作要求
 1. 开头从具体现象/问题切入
@@ -393,7 +394,7 @@ def _filter_top_materials(materials: list[dict], model: str = None) -> list[dict
         summary_text += f"[{i}] {title}\n  URL: {url}\n  Preview: {content_preview}...\n\n"
 
     messages = [
-        {"role": "system", "content": "你是一个素材筛选助手。从列表中选出最值得关注的15篇（或更少），优先选与企业AI落地、组织变革、工作流程、管理决策相关的素材。返回 JSON 格式的索引列表。"},
+        {"role": "system", "content": "你是一个素材筛选助手。从列表中选出最值得关注的15篇（或更少）。本号主轴是「企业AI应用落地」。优先选择包含**真实工作场景/业务流程改造/岗位变化/业务结果（ROI、降本、提效、自动化率）/实施数据/可复现步骤**的素材（无论来源是工程、产品还是案例）。组织/管理变革作为辅助，纯治理/风险/安全/对齐话题（若无落地证据）排到最后。返回 JSON 格式的索引列表。"},
         {"role": "user", "content": f"""素材列表：
 
 {summary_text[:50000]}
@@ -492,7 +493,7 @@ def step_write(topic_idx: int = 0, date_str: str = None,
 请输出完整的 Markdown 文章。"""},
     ]
 
-    response = call_model(messages, temperature=0.7, max_tokens=8192, model=model)
+    response = call_model(messages, temperature=0.7, max_tokens=None, model=model)
     if not response:
         print("  ❌ No response from model")
         return None
@@ -634,7 +635,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be done without generating")
     parser.add_argument("--model", type=str, default=get_model("synthesis"),
-                        choices=["deepseek-chat", "openai-codex/gpt-5.4"],
+                        choices=["deepseek-v4-flash", "openai-codex/gpt-5.4"],
                         help="Writing model")
     args = parser.parse_args()
 

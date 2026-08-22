@@ -151,8 +151,8 @@ def main():
         html_text = fetch_url(url, prefer="direct")
 
         if not html_text:
-            # Last resort: try Jina for link extraction (Jina returns plain text, not links—may still fail)
-            jina_text = fetch_url(url, prefer="jina")
+            # Last resort: try crawl4ai for link extraction
+            html_text = fetch_url(url, prefer="crawl4ai")
             fetch_errors += 1
             continue
 

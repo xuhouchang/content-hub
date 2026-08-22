@@ -9,23 +9,19 @@ else
   PYTHON="${PYTHON:-python3}"
 fi
 DATE="${DATE:-$(date +%Y-%m-%d)}"
-LOG_DIR="${SCRIPT_DIR}/logs"
-LOG_FILE="${LOG_DIR}/article_writeonly_${DATE}.log"
+LOG_DIR="$SCRIPT_DIR/logs"
+LOG_FILE="$LOG_DIR/case_${DATE}.log"
 
 mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "=========================================="
-echo "Content Platform: Write Articles — $DATE"
+echo "Content Platform Case Job — $DATE"
 echo "=========================================="
 
-# Run the canonical article pipeline. It writes the article, queues it in the
-# JSONL publish queue, and starts the idempotent draft worker in the background.
-"$PYTHON" "$SCRIPT_DIR/write_article.py" --date "$DATE"
-
-echo "📝 Article queued for async draft publishing"
+"$PYTHON" "$SCRIPT_DIR/platform_cli.py" run case-daily --date "$DATE" --workspace-dir "$SCRIPT_DIR"
 
 echo "=========================================="
-echo "Write-only phase complete"
+echo "Case job complete"
 echo "Log: $LOG_FILE"
 echo "=========================================="

@@ -2,10 +2,34 @@
 
 import datetime
 import json
+import re
 from pathlib import Path
 
 PRIMARY_TOPIC_THRESHOLD = 0.65
 MIN_CONTENT_CHARS = 800
+
+# AI safety exclusion rules
+# Topics matching these patterns are excluded UNLESS an exception pattern matches.
+AI_SAFETY_KEYWORDS = [
+    r'ai\s*(?:safety|alignment|governance|regulation|interpretability|explainability)',
+    r'red\s*teaming',
+    r'ai\s*(?:bias|fairness|discrimination)',
+    r'(?:existential|catastrophic)\s*risk',
+    r'ai\s*(?:risk|harm)\s*frameworks?',
+    r'(?:model|ai)\s*(?:safety|alignment)\s*(?:framework|research)',
+]
+
+# Exception patterns — if ANY matches, the material is ALLOWED even if
+# AI_SAFETY_KEYWORDS also matches.
+# This is a narrow list for genuinely surprising/deep AI safety content.
+AI_SAFETY_EXCEPTIONS = [
+    # Agent-to-agent real attack (with experimental evidence)
+    r'agent\s*(?:attack|attacking|compromise|hack)\s*(?:each|another|other)',
+    # Autonomous self-replication / unexpected emergent behavior with proof
+    r'(?:self\s*-\s*replicat|emergent.*behavior|unexpected.*capability).*experiment',
+    # Verified real-world incident with detailed technical report
+    r'real\s*-?world\s+incident.*(?:technical|detailed|report)',
+]
 
 # _recent_topics.json is written by write_article.py after each publish
 _RECENT_TOPICS_FILE = (
@@ -62,4 +86,35 @@ def build_article_pool(materials: list[dict], topic_memory: dict) -> dict:
         and material.get("quality", {}).get("content_chars", 0) >= MIN_CONTENT_CHARS
         and material.get("dedup", {}).get("cluster_id") not in recent_clusters
     ]
+
+    # ── Stage 2: Exclude AI safety topics (with exception check) ──
+    def _is_ai_safety_topic(material: dict) -> bool:
+        """Check if material is an AI safety topic, with narrow exception list."""
+        text_to_check = (
+            (material.get("title", "") or "") + " " +
+            (material.get("summary", "") or "") + " " +
+            (material.get("canonical_url", "") or "") + " " +
+            (material.get("url", "") or "") + " " +
+            (material.get("content", "") or "")[:2000]
+        ).lower()
+
+        # Check exceptions first (narrow allowlist)
+        for exc_pattern in AI_SAFETY_EXCEPTIONS:
+            if re.search(exc_pattern, text_to_check, re.IGNORECASE):
+                return False  # Exception applies — do NOT exclude
+
+        # Check main exclusion patterns
+        for pattern in AI_SAFETY_KEYWORDS:
+            if re.search(pattern, text_to_check, re.IGNORECASE):
+                return True  # AI safety topic — exclude
+
+        return False
+
+    excluded_by_safety = [m for m in candidates if _is_ai_safety_topic(m)]
+    if excluded_by_safety:
+        print(f"  🚫 Excluded {len(excluded_by_safety)} AI safety candidate(s):")
+        for m in excluded_by_safety[:5]:
+            print(f"     • {m.get('title', '')[:60]}")
+    candidates = [m for m in candidates if not _is_ai_safety_topic(m)]
+
     return {"candidates": candidates}

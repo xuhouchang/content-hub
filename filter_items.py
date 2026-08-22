@@ -23,7 +23,7 @@ from lib import fetch_url
 # ── Config ──
 DEFAULT_API_BASE = "https://api.deepseek.com/v1"
 DEFAULT_API_KEY = os.environ.get("DEEPSEEK_API_KEY", os.environ.get("LLM_API_KEY", ""))
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-v4-flash"
 
 COLLECTOR_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 TMP_DIR = COLLECTOR_DIR / "tmp"
@@ -159,7 +159,7 @@ def call_llm(messages: list, max_retries: int = 3) -> str | None:
         "model": MODEL,
         "messages": messages,
         "temperature": 0.1,
-        "max_tokens": 4096,
+        # 不限制 max_tokens（老板要求：DeepSeek 不设 Max token 限制），让生成自然完成
     }
 
     # Determine API endpoint

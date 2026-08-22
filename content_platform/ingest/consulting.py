@@ -52,14 +52,16 @@ def serper_search(queries: list[str], api_key: str, num_days: str = "m") -> list
 
 
 def load_consulting_materials(date_str: str, force: bool = False) -> list[dict]:
-    if not is_monday() and not force:
+    try:
+        sources_config = load_sources()
+    except ModuleNotFoundError:
+        sources_config = {}
+    run_daily = sources_config.get("consulting", {}).get("run_daily", False) or force
+    if not is_monday() and not run_daily:
         return []
 
     registry = load_url_registry()
-    try:
-        sources = load_sources()
-    except ModuleNotFoundError:
-        return []
+    sources = sources_config or {}
     materials = []
 
     serper_key = os.environ.get("SERPER_API_KEY", "")
@@ -100,7 +102,10 @@ def load_consulting_materials(date_str: str, force: bool = False) -> list[dict]:
                     }
                 )
 
-    for source in sources.get("thinktank", []):
+    thinktank_cfg = sources.get("thinktank", [])
+    if isinstance(thinktank_cfg, dict):
+        thinktank_cfg = thinktank_cfg.get("sources", [])
+    for source in thinktank_cfg:
         source_name = source["name"]
         source_url = source["url"]
         html_text = fetch_page(source_url)

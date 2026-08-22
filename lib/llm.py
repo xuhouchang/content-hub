@@ -3,7 +3,7 @@
 LLM call encapsulation for the collector pipeline.
 
 Unified call_model() that routes all models through OpenRouter API.
-- "deepseek-chat": deepseek/deepseek-chat on OpenRouter
+- "deepseek-v4-flash": deepseek/deepseek-v4-flash on OpenRouter
 - "openai-codex/gpt-5.4" or "openai/gpt-5.4": OpenAI GPT-5.4 on OpenRouter
 - Any other model identifier is passed as-is to OpenRouter.
 """
@@ -39,14 +39,14 @@ DEEPSEEK_BASE = "https://api.deepseek.com/v1"
 
 # ── Model Aliases ──
 MODEL_ALIASES = {
-    "deepseek-chat": "deepseek/deepseek-chat",
+    "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
     "openai-codex/gpt-5.4": "openai/gpt-5.4",
 }
 
 # ── Default Writing Model ──
-# Use "deepseek-chat" for DeepSeek (cheaper, fine for filtration/clustering)
+# Use "deepseek-v4-flash" for DeepSeek (cheaper, fine for filtration/clustering)
 # Use "openai/gpt-5.4" for actual writing
-DEFAULT_WRITING_MODEL = os.environ.get("WRITING_MODEL", "openai/gpt-5.4")
+DEFAULT_WRITING_MODEL = os.environ.get("WRITING_MODEL", "deepseek-v4-flash")
 
 # ── Per-call timeout / retry budget (governed centrally) ──
 # These were previously hardcoded (OpenRouter 180s/3 retries, DeepSeek
@@ -66,6 +66,11 @@ LLM_CALL_TIMEOUT = int(os.environ.get("LLM_CALL_TIMEOUT", "300"))
 # worst, comfortably under the 900s parent and the LLM_DEADLINE budget. The
 # OpenRouter->DeepSeek cross-provider fallback still provides redundancy.
 LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "1"))
+# Extra finite retries specifically for an EMPTY content response (reasoning
+# models occasionally burn budget and return content=""). These are bounded and
+# cheap — they only fire when the last attempt returned no usable text, and are
+# still short-circuited by the shared `deadline`.
+LLM_EMPTY_RETRIES = int(os.environ.get("LLM_EMPTY_RETRIES", "1"))
 # Absolute wall-clock deadline (epoch seconds) for the whole writer run.
 # None when not injected (callers that don't pass `deadline=` and runtime
 # doesn't set LLM_DEADLINE get no short-circuit — same as before P1-2).
@@ -89,7 +94,7 @@ def call_openrouter(
 
     Args:
         messages: List of dicts with 'role' and 'content' keys.
-        model: OpenRouter model ID (e.g., "deepseek/deepseek-chat", "openai/gpt-5.4").
+        model: OpenRouter model ID (e.g., "deepseek/deepseek-v4-flash", "openai/gpt-5.4").
         temperature: Sampling temperature.
         max_tokens: Maximum tokens in response.
         max_retries: Number of retry attempts on failure.
@@ -97,7 +102,7 @@ def call_openrouter(
     Returns:
         Response text string, or None on failure.
     """
-    model = model or "deepseek/deepseek-chat"
+    model = model or "deepseek/deepseek-v4-flash"
     model = resolve_model(model)
 
     if max_retries is None:
@@ -109,8 +114,13 @@ def call_openrouter(
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
     }
+    # max_tokens=None -> omit the field entirely (generation runs to natural
+    # completion instead of being hard-capped). DeepSeek reasoning models share
+    # the budget between reasoning_content and content, so an explicit cap can
+    # leave content EMPTY. Omitting lets the model finish writing.
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
 
     # Disable reasoning for GPT-5.4 (writing/polishing — don't want hidden thinking)
     if "gpt-5.4" in model or "gpt-5.3" in model or "gpt-5." in model:
@@ -134,13 +144,18 @@ def call_openrouter(
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if content:
+            raw_msg = data.get("choices", [{}])[0].get("message", {})
+            content = raw_msg.get("content") or ""
+            if content and content.strip():
                 return content
-            # Handle empty content (e.g., tool calls not supported)
+            # ── Empty/whitespace-only content: treat as failed call and retry ──
+            reasoning = raw_msg.get("reasoning_content") or ""
             finish = data.get("choices", [{}])[0].get("finish_reason", "")
-            if finish == "length":
-                return content  # Return partial
+            reason_note = "truncated-by-length" if finish == "length" else f"finish={finish or 'empty'}"
+            print(f"  ⚠️ OpenRouter: EMPTY content (attempt {attempt+1}/{max_retries}, "
+                  f"model={model}, {reason_note}, reasoning={len(reasoning)} tokens). "
+                  f"Retrying empty response.")
+            # Fall through to the end of the loop body, which sleeps and retries.
         except urllib.error.HTTPError as e:
             body = e.read().decode()
             try:
@@ -170,7 +185,7 @@ def call_openrouter(
 def call_deepseek_direct(
     messages: list,
     temperature: float = 1.0,
-    max_tokens: int = 8192,
+    max_tokens: int = None,
     max_retries: int = None,
     deadline: Optional[float] = None,
 ) -> Optional[str]:
@@ -181,11 +196,18 @@ def call_deepseek_direct(
 
     url = f"{DEEPSEEK_BASE}/chat/completions"
     payload = {
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        # deepseek-v4-flash is a REASONING model: reasoning_content shares the
+        # max_tokens budget with content, and reasoning length is unpredictable.
+        # We deliberately OMIT max_tokens entirely (老板要求：不限制 Max token)，
+        # so generation runs to natural completion instead of being hard-capped
+        # and left with empty/truncated content.
+        "reasoning_effort": "low",
     }
+    # NOTE: 不写入 max_tokens 字段。DeepSeek 直连统一不限制输出长度，
+    # 让 reasoning + content 各自自然跑完，避免截断/空卡。
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),
@@ -201,12 +223,29 @@ def call_deepseek_direct(
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if content:
-                return content
+            raw_msg = data.get("choices", [{}])[0].get("message", {})
+            content = raw_msg.get("content") or ""
+            reasoning = raw_msg.get("reasoning_content") or ""
             finish = data.get("choices", [{}])[0].get("finish_reason", "")
-            if finish == "length":
+            if content and content.strip():
                 return content
+            # ── Empty/whitespace-only content ──
+            # No usable text to hand back. Whether or not finish_reason is
+            # "length", an empty content is a FAILED call: we log the model,
+            # phase, reasoning length and retry a finite number of times rather
+            # than return an empty string (which callers would then .strip()
+            # into a misleading "" or raise NoneType.strip).
+            phase = "<unknown>"
+            if messages:
+                last_user = next((m.get("content") for m in reversed(messages)
+                                  if m.get("role") == "user" and m.get("content")), "")
+                if last_user:
+                    phase = (str(last_user)[:40].replace("\n", " ")) if isinstance(last_user, str) else phase
+            reason_note = "truncated-by-length" if finish == "length" else f"finish={finish or 'empty'}"
+            print(f"  ⚠️ DeepSeek Direct: EMPTY content (attempt {attempt+1}/{max_retries}, "
+                  f"model=deepseek-v4-flash, phase='{phase}', {reason_note}, "
+                  f"reasoning={len(reasoning)} tokens). Retrying empty response.")
+            # Fall through to the end of the loop body, which sleeps and retries.
         except urllib.error.HTTPError as e:
             body = e.read().decode()
             try:
@@ -230,6 +269,27 @@ def call_deepseek_direct(
             if attempt < max_retries - 1:
                 wait = (attempt + 1) * 10
                 time.sleep(wait)
+    # ── Bounded empty-content retries ──
+    # If the primary retry window produced no content, give the reasoning model
+    # a finite number of extra chances. Aborts immediately once the shared
+    # deadline is reached. Explicitly returns None (empty is never returned).
+    for rtry in range(1, LLM_EMPTY_RETRIES + 1):
+        if deadline is not None and time.time() > deadline:
+            print(f"  ⚠️ DeepSeek deadline exceeded during empty retry; aborting")
+            return None
+        print(f"  🔁 DeepSeek Direct empty-content retry {rtry}/{LLM_EMPTY_RETRIES}...")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode())
+            raw_msg = data.get("choices", [{}])[0].get("message", {})
+            content = raw_msg.get("content") or ""
+            if content and content.strip():
+                return content
+            reasoning = raw_msg.get("reasoning_content") or ""
+            print(f"  ⚠️ DeepSeek Direct: still empty after retry {rtry} "
+                  f"(reasoning={len(reasoning)} tokens)")
+        except Exception as e:
+            print(f"  ⚠️ DeepSeek Direct empty retry {rtry}/{LLM_EMPTY_RETRIES}: {e}")
     return None
 
 
@@ -269,20 +329,19 @@ def call_model(
     model = model or DEFAULT_WRITING_MODEL
 
     # ── 固化模型路由规则（不依赖 Skills / agent prompt）──
-    # 写作 & 润色（openai/gpt-5.4）：走 OpenRouter，GPT-5.4 直调
-    # 素材过滤 & 配图描述（deepseek-chat）：走 DeepSeek 直连（便宜）
+    # 写作 & 润色（openai/gpt 系）：走 OpenRouter；失败后 fallback DeepSeek 直连
+    # DeepSeek 系模型（deepseek/deepseek-v4-flash 等）：只走 DeepSeek 直连（便宜）
     # ─────────────────────────────────────────
-    if model and ("openai" in model or "gpt" in model or model == DEFAULT_WRITING_MODEL):
+    if model and ("openai" in model or "gpt" in model):
         # GPT 模型 → 走 OpenRouter
         result = call_openrouter(messages, model=model, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
-        if result:
+        if result and result.strip():
             return result
         print("  OpenRouter failed, falling back to DeepSeek direct...")
         return call_deepseek_direct(messages, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
 
-    # DeepSeek / 其他模型 → 走 DeepSeek 直连优先
+    # DeepSeek / 其他模型 → 只走 DeepSeek 直连，不 fallback 到 OpenRouter
     result = call_deepseek_direct(messages, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
-    if result:
-        return result
-    print("  DeepSeek direct failed, falling back to OpenRouter...")
-    return call_openrouter(messages, model=model, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
+    # Defensive: never leak an empty/whitespace string upstream — callers must
+    # be able to rely on `if not result` and on result.strip() being safe.
+    return result if (result and result.strip()) else None

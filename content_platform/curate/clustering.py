@@ -4,11 +4,12 @@ Tokenizes title + summary using simple word matching against priority tokens,
 with HTML stripping to avoid content pollution.
 """
 
+import asyncio
 import os
 import re
 
-# Minimum content chars before falling back to Jina.ai fetch
-_JINA_CONTENT_MIN = 2000
+# Minimum content chars before falling back to fetch via crawl4ai
+_CONTENT_FETCH_MIN = 2000
 
 STOPWORDS = {
     "a",
@@ -160,54 +161,34 @@ def _tokenize(text: str) -> list[str]:
     return tokens
 
 
-def _load_jina_key() -> str:
-    """Load JINA_API_KEY from env, .env file, or sources.yaml."""
-    key = os.environ.get("JINA_API_KEY", "")
-    if key:
-        return key
-    # Try loading from .env file (workspace root)
-    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env")
-    if os.path.isfile(env_path):
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("JINA_API_KEY="):
-                    key = line.split("=", 1)[1].strip('"\'')
-                    if key:
-                        return key
-    # Try sources.yaml fallback
-    try:
-        import yaml
-        src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "sources.yaml")
-        if os.path.isfile(src_path):
-            with open(src_path) as f:
-                cfg = yaml.safe_load(f)
-            jina_cfg = cfg.get("reader", {}).get("jina", {})
-            if jina_cfg.get("enabled", False):
-                k = jina_cfg.get("api_key", "")
-                if k and k != "your_jina_api_key_here":
-                    return k
-    except Exception:
-        pass
-    return ""
+def _fetch_content(url: str) -> str | None:
+    """Fetch a URL via crawl4ai (local, free), returning markdown text.
 
-
-def _fetch_jina(url: str) -> str | None:
-    """Fetch a URL via Jina.ai Reader API, returning markdown text."""
-    api_key = _load_jina_key()
-    if not api_key:
-        return None
+    Uses AsyncWebCrawler with a lightweight headless browser.
+    Falls back silently on failure.
+    """
     try:
-        import requests
-        resp = requests.get(
-            f"https://r.jina.ai/{url}",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        return resp.text
+        from crawl4ai import AsyncWebCrawler
+
+        async def do_fetch():
+            async with AsyncWebCrawler(verbose=False) as crawler:
+                result = await crawler.arun(
+                    url=url,
+                    word_count_threshold=10,
+                    bypass_cache=True,
+                )
+                return result.markdown if result else None
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            markdown = loop.run_until_complete(do_fetch())
+        finally:
+            loop.close()
+
+        return markdown
     except Exception as e:
-        print(f"  [cluster] Jina fetch failed for {url[:60]}: {e}")
+        print(f"  [cluster] Crawl4AI fetch failed for {url[:70]}: {e}")
         return None
 
 
@@ -219,13 +200,13 @@ def _cluster_seed(material: dict) -> str:
     content_text = material.get("content_text", "")
     text_source = "default"
 
-    if len(content_text) < _JINA_CONTENT_MIN:
+    if len(content_text) < _CONTENT_FETCH_MIN:
         url = material.get("canonical_url", material.get("url", ""))
         if url:
-            jina_body = _fetch_jina(url)
-            if jina_body and len(jina_body) > _JINA_CONTENT_MIN:
-                content_text = _strip_html(jina_body)
-                text_source = "jina"
+            fetched = _fetch_content(url)
+            if fetched and len(fetched) > _CONTENT_FETCH_MIN:
+                content_text = _strip_html(fetched)
+                text_source = "crawl4ai"
 
     # Build text from title + content_text
     text = " ".join(

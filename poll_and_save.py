@@ -32,6 +32,7 @@ REPORTS_DIR = Path(os.environ.get(
 
 ALL_URLS_FILE = REPORTS_DIR / "_index" / "all_urls.tsv"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+MIN_CONTENT_CHARS = 300
 
 
 # ── Helpers (duplicated from lib.py to keep this file self-contained) ──
@@ -120,13 +121,33 @@ def fetch_full_content(url: str) -> str | None:
     except Exception:
         pass
 
-    # ── Fallback: Jina.ai Reader API ──
+    # ── Fallback: crawl4ai (local, free) ──
     try:
-        _sys.path.insert(0, str(COLLECTOR_DIR))
-        from lib import _fetch_via_jina
-        jina_result = _fetch_via_jina(url, timeout=30)
-        if jina_result and len(jina_result.strip()) >= 300:
-            return jina_result.strip()[:50000]
+        from crawl4ai import AsyncWebCrawler
+        import asyncio
+
+        async def do_fetch():
+            async with AsyncWebCrawler() as crawler:
+                result = await crawler.arun(
+                    url=url,
+                    word_count_threshold=10,
+                    bypass_cache=True,
+                    verbose=False,
+                )
+                md = result.markdown if result else None
+                if md and len(md.strip()) >= 300:
+                    return md.strip()[:50000]
+                return None
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            crawl_result = loop.run_until_complete(do_fetch())
+        finally:
+            loop.close()
+
+        if crawl_result:
+            return crawl_result
     except Exception:
         pass
 
@@ -202,6 +223,11 @@ def merge_with_raw(filtered: list, raw: list) -> list:
     return merged
 
 
+def has_substantive_content(content: str) -> bool:
+    """Return whether fetched or fallback content is worth saving/indexing."""
+    return len(content.strip()) >= MIN_CONTENT_CHARS
+
+
 # ── Save Handlers ──
 
 def save_rss(items: list, date_str: str):
@@ -220,6 +246,9 @@ def save_rss(items: list, date_str: str):
         save_dir.mkdir(parents=True, exist_ok=True)
         full_content = fetch_full_content(url)
         content_text = full_content or (item.get("summary") or "No content available")
+        if not has_substantive_content(content_text):
+            print(f"  ⏭️  Content too short ({len(content_text.strip())} chars): {url[:60]}")
+            continue
         topics = item.get("topics", [])
         topics_str = json.dumps(list(topics))
         md = f"""---
@@ -242,14 +271,8 @@ relevance: high
         with open(filepath, "w") as f:
             f.write(md)
         saved += 1
+        new_urls.append(url)
         print(f"  Saved: {filepath.name}")
-
-        # ── Only register URL if content is substantive ──
-        stub_patterns = ["No content available", "No summary available", ""]
-        if content_text.strip() not in stub_patterns and len(content_text.strip()) >= 300:
-            new_urls.append(url)
-        else:
-            print(f"  ⚠️  Skipping URL registration (stub content, {len(content_text.strip())} chars)")
     if new_urls:
         append_to_url_registry(new_urls)
     update_daily_summary(date_str, "Part 1: RSS Feeds", {"saved": saved, "registered": len(new_urls)})
@@ -272,6 +295,9 @@ def save_blogs(items: list, date_str: str):
         save_dir.mkdir(parents=True, exist_ok=True)
         full_content = fetch_full_content(url)
         content_text = full_content or (item.get("summary") or "No content available")
+        if not has_substantive_content(content_text):
+            print(f"  ⏭️  Content too short ({len(content_text.strip())} chars): {url[:60]}")
+            continue
         topics = item.get("topics", [])
         topics_str = json.dumps(list(topics))
         md = f"""---
@@ -294,14 +320,8 @@ relevance: high
         with open(filepath, "w") as f:
             f.write(md)
         saved += 1
+        new_urls.append(url)
         print(f"  Saved: {filepath.name}")
-
-        # ── Only register URL if content is substantive ──
-        stub_patterns = ["No content available", "No summary available", ""]
-        if content_text.strip() not in stub_patterns and len(content_text.strip()) >= 300:
-            new_urls.append(url)
-        else:
-            print(f"  ⚠️  Skipping URL registration (stub content, {len(content_text.strip())} chars)")
     if new_urls:
         append_to_url_registry(new_urls)
     update_daily_summary(date_str, "Part 2: AI Company Blogs", {"saved": saved, "registered": len(new_urls)})
@@ -324,6 +344,9 @@ def save_consulting(items: list, date_str: str):
         save_dir.mkdir(parents=True, exist_ok=True)
         full_content = fetch_full_content(url)
         content_text = full_content or item.get("summary") or "No content available"
+        if not has_substantive_content(content_text):
+            print(f"  ⏭️  Content too short ({len(content_text.strip())} chars): {url[:60]}")
+            continue
         topics = item.get("topics", [])
         topics_str = json.dumps(list(topics))
         md = f"""---
@@ -346,14 +369,8 @@ relevance: high
         with open(filepath, "w") as f:
             f.write(md)
         saved += 1
+        new_urls.append(url)
         print(f"  Saved: {filepath.name}")
-
-        # ── Only register URL if content is substantive ──
-        stub_patterns = ["No content available", "No summary available", ""]
-        if content_text.strip() not in stub_patterns and len(content_text.strip()) >= 300:
-            new_urls.append(url)
-        else:
-            print(f"  ⚠️  Skipping URL registration (stub content, {len(content_text.strip())} chars)")
     if new_urls:
         append_to_url_registry(new_urls)
     update_daily_summary(date_str, "Part 3: Consulting Reports", {"saved": saved, "registered": len(new_urls)})

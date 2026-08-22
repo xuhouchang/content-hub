@@ -30,6 +30,7 @@ from typing import Optional
 
 # ── Import LLM and materials from lib/ ──
 from lib.llm import call_model
+from lib import pexels_images as px
 from lib.models import get_model
 
 # ── Polish script reference ──（移到 COLLECTOR_DIR 定义之后）
@@ -37,7 +38,6 @@ from lib.materials import (
     get_all_collected_urls,
     read_material_content,
     sample_materials,
-    filter_used_materials,
 )
 
 # ── Chinese political topic filter ──
@@ -132,11 +132,10 @@ EMBED_IMAGES_SCRIPT = COLLECTOR_DIR / "embed_images.py"
 POLISH_SCRIPT = COLLECTOR_DIR / "polish_article.py"
 
 # ── Publish queue (decoupled async publish stage) ──
-# Writing and publishing are now two separate stages. A successful write
-# enqueues the article here; publish_worker.py (a separate process) consumes
-# the queue and creates the WeChat draft. See publish_worker.py.
+# Writing and publishing are separate scheduled stages. A successful write
+# only enqueues the article; publish_worker.py is started independently by
+# cron and creates the WeChat draft. See publish_worker.py.
 QUEUE_DIR = COLLECTOR_DIR / "queue"
-WORKER_PATH = COLLECTOR_DIR / "publish_worker.py"
 
 # ── System prompt for article writing ──
 
@@ -162,6 +161,40 @@ WRITING_SYSTEM_PROMPT = """你是一位公众号撰稿人。素材给了你什�
 不必每篇追求"颠覆认知"。有些好文章就是"把这个事情说明白了"。
 
 排除项：模型/产品发布动态、技术教程、工具评测、投融资新闻。
+
+## 素材源优先级
+
+素材源决定文章质量下限。按以下优先级选择写入素材：
+
+**S级（优先使用）：** 大厂报告/白皮书（Google、Microsoft、Anthropic、OpenAI、Meta、Amazon、Apple）、顶级咨询公司报告（McKinsey、BCG、Bain、Deloitte、PwC、Accenture、KPMG）、顶级学术论文（Nature、Science、NeurIPS、ICML）、权威媒体深度报道（NYT、WSJ、FT、Bloomberg、The Atlantic、New Yorker的长报道/调查报道）。
+
+**A级（可用）：** 行业垂直研究（Gartner、Forrester、IDC）、知名投资机构分析（a16z、Sequoia、Index Ventures）、技术博客（Google AI、Meta AI、OpenAI Blog、Anthropic Blog）、可信中英文媒体的分析/观点文章。
+
+**B级（谨慎使用）：** 一般媒体报道、个人博客、社区讨论。仅在观点独特或信息互补时使用。
+
+**C级（跳过）：** 来源不明的自媒体、纯翻译/搬运内容、AI摘要生成的文章。
+
+写作时至少有一个核心素材是 S 级或 A 级。
+
+## AI 安全白名单
+
+**默认禁止**以下 AI 安全相关话题作为主选题：
+- AI 对齐（alignment）/ 价值观对齐
+- AI 安全（safety）/ 红队测试（red teaming）
+- AI 监管 / 政策法规
+- AI 偏见 / 公平性 / 歧视
+- AI 可解释性（interpretability / explainability）
+- AI 风险 / 存在风险 / 毁灭风险
+- AI 治理框架 / 评估框架（如 Anthropic 的 safety frameworks）
+
+**例外条件（满足全部三条才可写）：**
+1. 观点与主流认知明显不一致（不是换个角度，是真不一样）
+2. 包含实验/事件/数据支撑，不是纯观点陈述
+3. 有具体的行为结果，不是风险可能性讨论
+
+**可接受的例子：**「Agent 之间在真实生产环境中相互攻击，导致系统崩溃，并有完整复现实验和攻击链文档」——因为有实验、有具体行为、有人类未曾预料的结果。
+
+**不可接受的例子：**「AI 安全框架需要迭代」「模型对齐仍然存在根本性挑战」——没有新信息、没有具体事件。
 
 ## 写作目标（两条路径通用）
 1. 让读者理解一个正在发生的变化
@@ -273,23 +306,409 @@ WRITING_SYSTEM_PROMPT = """你是一位公众号撰稿人。素材给了你什�
 
 # ── Helpers ──
 
+def _safe_str(v):
+    """Defensive: coerce to a stripped non-empty string or empty string. Never None."""
+    if v is None:
+        return ""
+    if isinstance(v, list):
+        v = "；".join(str(x) for x in v if x is not None)
+    return str(v).strip()
+
+
+def _build_structured_material(m: dict) -> dict:
+    """Normalize one material into the structured research format (方案 4.1).
+
+    Loads whatever structured fields already exist on the material / tag DB,
+    then falls back to heuristics over the raw text. Never crashes on missing
+    fields — the goal is a *compatible, enriched* context, not a rewrite.
+    """
+    import re as _re
+    url = (m.get("url") or m.get("canonical_url") or "") or ""
+    title = _safe_str(m.get("title") or url)
+    summary = _safe_str(m.get("summary") or m.get("digest"))
+    content = m.get("content") or ""
+    key_signal = _safe_str(m.get("key_signal"))
+
+    # ── Prefer existing structured fields if present ──
+    facts = m.get("facts") or []
+    data_points = m.get("data_points") or []
+    mechanisms = m.get("mechanisms") or []
+    author_judgments = m.get("author_judgments") or []
+    counterpoints = m.get("counterpoints") or []
+    boundaries = m.get("boundaries") or []
+    source_grade = _safe_str(m.get("source_grade") or m.get("source_quality") or "unknown")
+
+    # ── Reuse tag DB when available (research cards / tag_materials) ──
+    if not (facts or data_points or mechanisms or author_judgments) and content:
+        try:
+            from lib.materials import _load_material_tags
+            tags_db = _load_material_tags()
+            entry = tags_db.get(url.rstrip("/"), {})
+            if not key_signal:
+                key_signal = _safe_str(entry.get("key_signal"))
+            tags = entry.get("tags") or {}
+            for dim, tag in tags.items():
+                tag = _safe_str(tag)
+                if not tag or len(tag) < 4:
+                    continue
+                diml = str(dim).lower()
+                if any(k in diml for k in ("事实", "fact", "数据", "data")):
+                    facts.append(tag)
+                elif any(k in diml for k in ("机制", "mechan", "judg", "观点", "判断")):
+                    if any(k in diml for k in ("judg", "观点", "判断")):
+                        author_judgments.append(tag)
+                    if any(k in diml for k in ("机制", "mechan")):
+                        mechanisms.append(tag)
+                elif any(k in diml for k in ("结论", "insight", "key", "signal")):
+                    if not key_signal:
+                        key_signal = tag
+        except Exception:
+            pass
+
+    # ── Light heuristic extraction from the leading part of the body ──
+    if not facts and content:
+        # pull concrete numbers/% out of the material as data points
+        for mt in _re.finditer(r'(\d{1,3}(?:[\.,]\d+)?\s*%|\d+\s*(?:亿|万|B|M|K)|\$\s?\d+)', content):
+            data_points.append({"claim": mt.group(0), "value": mt.group(0), "source": url})
+
+    facts = [str(x) for x in facts if x][:6]
+    data_points = [x for x in data_points if isinstance(x, dict)][:6]
+    mechanisms = [str(x) for x in mechanisms if x][:5]
+    author_judgments = [str(x) for x in author_judgments if x][:5]
+    counterpoints = [str(x) for x in counterpoints if x][:3]
+    boundaries = [str(x) for x in boundaries if x][:3]
+
+    return {
+        "title": title,
+        "source_url": url,
+        "source_grade": source_grade,
+        "summary": summary,
+        "facts": facts,
+        "data_points": data_points,
+        "mechanisms": mechanisms,
+        "author_judgments": author_judgments,
+        "counterpoints": counterpoints,
+        "boundaries": boundaries,
+        "key_signal": key_signal,
+    }
+
+
 def build_material_context(materials: list[dict]) -> str:
-    """Build a context string from materials for the LLM.
-    
-    Includes key_signal (观点信号) when available, so the LLM can
-    see each material's core thesis at a glance before reading the full content.
+    """Build a structured research-card context from materials (方案 4.1).
+
+    Injects each material as a structured "素材研究卡" (facts / data / mechanism /
+    judgment / counterpoint / boundary / source), NOT a blind 3000-char truncation.
+    Long raw bodies are attached only as constrained supporting detail, so the
+    writer still has evidence but is not drowning in multiple article *openings*.
     """
     parts = []
     for i, m in enumerate(materials, 1):
-        content = m.get("content", "")
-        url = m.get("url", "")
-        key_signal = m.get("key_signal", "")
-        header = f"=== 素材 {i} ===\n来源: {url}"
-        if key_signal:
-            header += f"\n核心观点: {key_signal}"
-        header += f"\n{content[:3000]}"
-        parts.append(header)
+        card = _build_structured_material(m)
+        body = m.get("content") or ""
+        lines = [
+            f"=== 素材 {i} ===",
+            f"标题: {card['title']}",
+            f"来源: {card['source_url']}   (级别: {card['source_grade']})",
+        ]
+        if card["summary"]:
+            lines.append(f"摘要: {card['summary']}")
+        if card["key_signal"]:
+            lines.append(f"独特信号: {card['key_signal']}")
+        if card["facts"]:
+            lines.append("可核验事实: " + "；".join(card["facts"]))
+        if card["data_points"]:
+            dp = []
+            for d in card["data_points"]:
+                if isinstance(d, dict):
+                    claim = _safe_str(d.get("claim") or d.get("value"))
+                    src = _safe_str(d.get("source"))
+                    dp.append(f"{claim}(源:{src})" if src else claim)
+                else:
+                    dp.append(str(d))
+            lines.append("数据点: " + "；".join(dp))
+        if card["mechanisms"]:
+            lines.append("机制链: " + "；".join(card["mechanisms"]))
+        if card["author_judgments"]:
+            lines.append("原作者判断: " + "；".join(card["author_judgments"]))
+        if card["counterpoints"]:
+            lines.append("反方/限制: " + "；".join(card["counterpoints"]))
+        if card["boundaries"]:
+            lines.append("适用边界: " + "；".join(card["boundaries"]))
+        # Constrained body excerpt for depth (still capped, but each section is
+        # labeled so the writer knows what it is, instead of a wall of openings).
+        if body:
+            lines.append(f"\n原文摘录(前{1900}字):\n" + str(body)[:1900].replace("\n", " "))
+        parts.append("\n".join(lines))
     return "\n\n".join(parts)
+
+
+BLUEPRINT_SYSTEM_PROMPT = """你是一个公众号文章的"蓝图设计师"。你只负责产出文章蓝图（结构化 JSON），不写正文。
+
+素材可能包含：事实、数据、机制、作者判断、反方观点、适用边界。你必须基于这些素材做独立判断，而不是复述素材标题。
+
+## 输出要求
+只输出一个 JSON 对象（不要任何前后缀文字、不要 markdown 代码块），结构如下：
+{
+  "topic": "文章主题",
+  "thesis": "一句可复述的核心判断（必须有明确立场，禁止'AI正在快速发展'这类泛判断）",
+  "why_now": "为什么现在值得写",
+  "evidence": ["支持判断的事实/数据/案例及来源"],
+  "mechanism_chain": ["现象", "中间机制", "结果/影响"],
+  "counterargument": "最强反方观点",
+  "boundary": "适用边界或不成立的情况",
+  "reader_consequence": "对企业管理者/读者的具体影响",
+  "outline": ["章节判断1", "章节判断2", "章节判断3"],
+  "title_candidates": ["标题1", "标题2", "标题3"],
+  "source_map": [{"claim": "判断", "source_urls": ["URL"]}]
+}
+
+## 硬约束
+- thesis 必须能脱离素材被一句话复述，且机制链至少 2 个环节。
+- mechanism_chain 明说 因果/传导，禁止只堆现象。
+- evidence 至少 2 条真实可追溯（来自上面素材）；没有的话，明确标注"证据不足"，且 data 字段留空，绝不允许编造数字。
+- 必须给 counterargument 和 boundary（反方/边界至少一个真实存在）。
+- outline 是"推进判断的章节"，不是对素材标题的改写。
+- 所有素材必须属于同一核心议题；若素材跨主题，topic 只能聚焦其中一个，其余在 counterargument/boundary 中处理，禁止跨主题拼接。
+- 若单一论点素材不足以支撑深度，输出 {"insufficient": true, "reason": "..."}。"""
+
+
+def build_blueprint_prompt(context: str, angle_instruction: str) -> list[dict]:
+    """Stage-1 prompt: produce ONLY a blueprint JSON, no article body."""
+    user = (
+        "素材（结构化研究卡）：\n"
+        f"{context}\n\n"
+        f"{angle_instruction}\n"
+        "请基于以上素材，生成文章蓝图 JSON。只输出 JSON 对象本身，不要解释、不要正文。"
+    )
+    return [
+        {"role": "system", "content": BLUEPRINT_SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+
+
+BLUEPRINT_HARD_FAIL_MSG = (
+    "⚠️ 蓝图未通过校验，不进入正文写作。请补足后重试：{reasons}"
+)
+
+
+def validate_blueprint(bp: dict) -> dict:
+    """Validate a blueprint against 方案 4.3 criteria.
+
+    Returns {"ok": True} or {"ok": False, "reasons": [...]}.
+    """
+    reasons = []
+    if "insufficient" in bp and bp.get("insufficient"):
+        return {"ok": False, "reasons": ["素材不足：不建议成文/需要补充材料", str(bp.get("reason") or "")]}
+
+    thesis = _safe_str(bp.get("thesis"))
+    if not thesis or len(thesis) < 8:
+        reasons.append("thesis 缺失或过短")
+    # 泛判断拦截
+    _ban = ["AI正在快速发展", "AI快速发展", "数字化是大势所趋", "人工智能正在改变世界",
+            "AI已经成为趋势", "时代在变化"]
+    if thesis and any(b in thesis for b in _ban):
+        reasons.append("thesis 是泛判断")
+
+    mechanism = bp.get("mechanism_chain") or []
+    if not isinstance(mechanism, list) or len(mechanism) < 2 or not any(_safe_str(x) for x in mechanism):
+        reasons.append("机制链 mechanism_chain 少于2个环节")
+
+    evidence = bp.get("evidence") or []
+    if not isinstance(evidence, list) or len([e for e in evidence if _safe_str(e)]) < 2:
+        reasons.append("evidence 少于2条可追溯证据")
+
+    if not _safe_str(bp.get("counterargument")) and not _safe_str(bp.get("boundary")):
+        reasons.append("缺少反方观点或边界")
+
+    outline = bp.get("outline") or []
+    if isinstance(outline, list):
+        if not outline or not any(_safe_str(o) for o in outline):
+            reasons.append("outline 为空")
+
+    return {"ok": not reasons, "reasons": reasons}
+
+
+def _safe_source_map(blueprint) -> list:
+    """Extract a safe list of {claim, source_urls} from a blueprint dict."""
+    if not isinstance(blueprint, dict):
+        return []
+    src_map = blueprint.get("source_map")
+    if not isinstance(src_map, list):
+        return []
+    out = []
+    for sm in src_map:
+        if isinstance(sm, dict):
+            claim = _safe_str(sm.get("claim"))
+            urls = [u for u in (sm.get("source_urls") or []) if isinstance(u, str) and u]
+            if claim or urls:
+                out.append({"claim": claim, "source_urls": urls})
+    return out
+
+
+def extract_blueprint(response: str) -> dict:
+    """Parse blueprint JSON from LLM response, tolerating code fences / stray text."""
+    import json as _json
+    if response is None or not response.strip():
+        return {}
+    text = response.strip()
+    # strip markdown code fence if present
+    import re as _re
+    fence = _re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, _re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+    else:
+        # take from first { to last }
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end + 1]
+    try:
+        obj = _json.loads(text)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+# ── 文章质量闸门（纯 Python，无副作用；方案 4.5）──
+
+def check_article_quality(
+    article_text: str,
+    title: str = "",
+    source_map: Optional[list] = None,
+) -> dict:
+    """Pure, side-effect-free quality gate.
+
+    8 checks; hard gates = has_thesis, has_mechanism, no_empty_content.
+    Rules are only the FIRST pass — the main agent does final acceptance.
+    Returns {"passed", "score", "checks", "warnings", "reasons"}.
+    """
+    import re as _re
+    text = article_text or ""
+    reasons: list[str] = []
+    warnings: list[str] = []
+
+    has_content = bool(text.strip())
+    # 1. no_empty_content (hard)
+    if not has_content or len(text.strip()) < 200:
+        has_content = False
+
+    # 2. has_thesis (hard): a judgment sentence exists (not a pure question)
+    sentences = [s.strip() for s in _re.split(r'[。!?！？\n]', text) if s.strip()]
+    judgment_sentences = [s for s in sentences if len(s) >= 8 and not s.startswith(("为什么", "如何", "是不是", "吗"))]
+    has_thesis = len(judgment_sentences) >= 1
+
+    # 3. has_mechanism (hard): looks for causal chain markers
+    mechanism_markers = ["因为", "导致", "所以", "从而", "这意味着", "因此", "传导", "机制", "链", "后果", "推动", "转化为", "从而使得"]
+    has_mechanism = any(m in text for m in mechanism_markers)
+
+    # 4. has_evidence: specific numbers or explicit claim
+    has_numbers = bool(_re.search(r'\d+\s*[%万亿]|\d+\.\d+|\$\s?\d+|\d+\s*(人|家|个|倍)', text))
+    evidence_claims = ["数据", "调查", "报告", "实验", "案例", "抽样", "样本", "研究"]
+    has_evidence = has_numbers or any("".join(k) in text for k in evidence_claims)
+
+    # 5. has_counterpoint_or_boundary
+    boundary_markers = ["但", "不过", "然而", "局限", "边界", "不适用", "例外", "反例", "另一方面", "代价", "前提", "并非"]
+    has_counterpoint_or_boundary = any(m in text for m in boundary_markers)
+
+    # 6. has_source_traceability
+    has_url = bool(_re.search(r'https?://', text)) or bool(_re.search(r'来源[:：]', text))
+    sources_present = source_map and any(
+        (sm.get("source_urls") or []) for sm in source_map) if isinstance(source_map, list) else False
+    has_source_traceability = has_url or sources_present
+
+    # 7. not_material_dump: paragraphs aren't just verbatim quotes / list replays
+    paragraphs = [p for p in _re.split(r'\n\s*\n', text) if p.strip()]
+    verbatim_count = 0
+    for p in paragraphs:
+        p_stripped = p.strip()
+        if p_stripped.startswith(("=== 素材", "原文摘录", "• ")) or len(p_stripped) < 8:
+            verbatim_count += 1
+    not_material_dump = (len(paragraphs) == 0) or (verbatim_count / max(len(paragraphs), 1) < 0.5)
+
+    # 8. title_is_judgment
+    if title:
+        ban_titles = ["报告解读", "深度分析", "几点思考", "发展趋势", "数字化转型的思考", "AI的发展"]
+        title_is_judgment = not any(b in title for b in ban_titles) and len(title) >= 6
+    else:
+        first_heading = _re.search(r'^#\s+(.+)', text, _re.MULTILINE)
+        title_is_judgment = bool(first_heading) and len(first_heading.group(1).strip()) >= 6
+
+    checks = {
+        "has_thesis": bool(has_thesis),
+        "has_mechanism": bool(has_mechanism),
+        "has_evidence": bool(has_evidence),
+        "has_counterpoint_or_boundary": bool(has_counterpoint_or_boundary),
+        "has_source_traceability": bool(has_source_traceability),
+        "not_material_dump": bool(not_material_dump),
+        "title_is_judgment": bool(title_is_judgment),
+        "no_empty_content": bool(has_content),
+    }
+    passed_count = sum(1 for v in checks.values() if v)
+
+    hard_fail = not (checks["has_thesis"] and checks["has_mechanism"] and checks["no_empty_content"])
+    passed = (not hard_fail) and passed_count >= 6
+
+    if not checks["no_empty_content"]:
+        reasons.append("文章为空或过短")
+    if not checks["has_thesis"]:
+        reasons.append("缺少可复述的核心判断")
+    if not checks["has_mechanism"]:
+        reasons.append("缺少机制链")
+    if passed_count < 6:
+        reasons.append(f"通过 {passed_count}/8，低于 6 项门槛")
+
+    return {
+        "passed": passed,
+        "score": passed_count,
+        "checks": checks,
+        "warnings": warnings,
+        "reasons": reasons,
+    }
+
+
+# ── 完整质量闸门 = 规则硬门槛 + LLM 语义评估（方案升级）──
+# 兼容保留 check_article_quality（纯规则，老调用方不变）。
+# evaluate_article_quality 在其上叠加 LLM 语义复核：
+#   规则硬门槛不过 -> 直接不可通过；
+#   规则过 -> 用 lib.quality_judge 调 DeepSeek 直连做 8 维语义评估；
+#   任何不可用/失败 -> 按不可通过处理，绝不伪造通过。
+def evaluate_article_quality(
+    article_text: str,
+    title: str = "",
+    source_map: Optional[list] = None,
+    blueprint_text: str = "",
+    enable_llm_judge: bool | None = None,
+    model: str | None = None,
+) -> dict:
+    """规则硬门槛 + LLM 语义评估 的完整质量闸门。
+
+    默认行为：若环境变量 QUALITY_LLM_JUDGE 为真值（1/true/on）且凭证可用则启用 LLM 语义评估；
+    否则仅规则层（degraded 模式，绝不伪造通过）。
+    返回 dict 字段与 check_article_quality 兼容，另含 rules/llm/status。
+    """
+    if enable_llm_judge is None:
+        enable_llm_judge = os.environ.get("QUALITY_LLM_JUDGE", "").strip().lower() in ("1", "true", "yes", "on")
+    if not enable_llm_judge:
+        # degraded：仅规则层，显式可见，不做语义复核（不会伪造通过）。
+        base = check_article_quality(article_text, title=title, source_map=source_map)
+        base["status"] = "rules"
+        base["rules"] = dict(base)
+        base["llm"] = None
+        return base
+    try:
+        from lib.quality_judge import evaluate_quality
+    except Exception:
+        base = check_article_quality(article_text, title=title, source_map=source_map)
+        base["status"] = "rules"
+        base["rules"] = dict(base)
+        base["llm"] = None
+        return base
+    return evaluate_quality(
+        article_text,
+        title=title,
+        source_map=source_map,
+        blueprint_text=blueprint_text,
+        model=model,
+    )
 
 
 def extract_article_from_response(response: str) -> Optional[str]:
@@ -445,6 +864,28 @@ def strip_digest_from_article(response: str) -> str:
     return re.sub(r'^.*摘要[：:].*$\n?', '', response, count=1, flags=re.MULTILINE).strip()
 
 
+def _extract_placeholder_alt_text(content: str) -> dict[int, str]:
+    """Map image index (1-based) to its placeholder alt/description text.
+
+    Reads both `![alt](./images/image-NNN-...)` and legacy `<!-- IMAGE: N -->`
+    forms. Returns {index: alt_text}. Used to feed Pexels-first body-image
+    retrieval with per-placeholder captions.
+    """
+    out: dict[int, str] = {}
+    # Primary: ![alt](./images/image-NNN-xxx...)
+    for m in re.finditer(r'!\[([^]]*)\]\(\./images/image-(\d{3})', content):
+        alt = m.group(1).strip()
+        idx = int(m.group(2))
+        if alt and idx not in out:
+            out[idx] = alt
+    # Legacy: <!-- IMAGE: N -->
+    for m in re.finditer(r'<!--\s*IMAGE\s*:\s*(\d+)\s*-->', content, re.IGNORECASE):
+        idx = int(m.group(1))
+        if idx not in out:
+            out[idx] = "配图"
+    return out
+
+
 def count_image_placeholders(content: str) -> int:
     """Count image placeholders in content. Supports both formats."""
     # Primary: <!-- IMAGE: N --> (legacy support)
@@ -455,8 +896,23 @@ def count_image_placeholders(content: str) -> int:
     return count2 if count2 > 0 else count1
 
 
-def run_image_search(query: str, output_dir: str, index: int = 1) -> bool:
-    """Run image_search.py for one query. Returns True if at least one image downloaded."""
+def run_image_search(
+    query: str,
+    output_dir: str,
+    index: int = 1,
+    description: str = "",
+) -> bool:
+    """Resolve one placeholder with a Pexels-first policy.
+
+    With PEXELS_FIRST enabled (default), tries the reusable, in-process resolver
+    (lib.pexels_images.resolve_image) which searches Pexels using the placeholder
+    `description` and post-processes the photo. Only when that yields nothing (or
+    PEXELS_FIRST is disabled) does it fall back to the legacy image_search.py
+    subprocess (Pexels -> Pixabay -> local placeholder), so the article still
+    renders a real file.
+
+    Returns True if an image file for index `index` now exists.
+    """
     # R1: skip remaining image searches when the global budget is nearly
     # exhausted. We guard here (in addition to image_search.py itself) so we
     # don't even spawn the subprocess — the writer then finishes and publishes
@@ -468,10 +924,36 @@ def run_image_search(query: str, output_dir: str, index: int = 1) -> bool:
     if _img_deadline and time.time() > _img_deadline - 60:
         print(f"  ⏱️ Image-search budget nearly exhausted; skipping '{query}' (placeholder fallback)")
         return False
+
+    images_dir = Path(output_dir)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    expected = images_dir / f"image-{index:03d}-pexels.jpg"
+
+    # Pexels-first, in-process resolver (reusable module). Honors PEXELS_FIRST.
+    # Prefer a per-placeholder description-derived query (more specific English
+    # keywords for the caption); fall back to the caller's whole-article query.
+    if px.PEXELS_FIRST:
+        placeholder_query = px._build_query(description, filename_hint=f"image-{index:03d}-{query}") \
+            if description and description != query else ""
+        search_q = placeholder_query or query or "enterprise business technology"
+        res = px.resolve_image(
+            expected,
+            description=description,
+            query=search_q,
+            filename_hint=f"image-{index:03d}-{query}" if query else "",
+            output_dir=images_dir,
+            allow_generative=False,   # body images: never silently generate here
+            gen_fallback=None,
+            long_edge=px.DEFAULT_LONG_EDGE,
+        )
+        if res.ok and res.path and res.path.exists():
+            return True
+        print(f"  ⚠️ Pexels-first no hit for '{search_q}': {res.reason}")
+
+    # Legacy subprocess fallback (Pexels -> Pixabay -> local placeholder).
     if not IMAGE_MATCHER_SCRIPT.exists():
         print(f"  ⚠️ image_search.py not found: {IMAGE_MATCHER_SCRIPT}")
         return False
-
     cmd = [
         sys.executable, str(IMAGE_MATCHER_SCRIPT),
         query,
@@ -481,7 +963,6 @@ def run_image_search(query: str, output_dir: str, index: int = 1) -> bool:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode == 0:
-            # Check if image file was created
             import glob
             image_files = glob.glob(os.path.join(output_dir, f"image-{index:03d}-*"))
             return len(image_files) > 0
@@ -768,6 +1249,16 @@ def write_article(
         angle_instruction += (
             "\n---\n"
             "近7天已发文章（对你要求：**不要写跟这些文章角度、推理链、核心判断类似的内容。**）：\n"
+            "\n"
+            "## 内容深度检查清单\n"
+            "\n"
+            "写作前，隐去所有素材，仅凭记忆问自己：\n"
+            "1. 这篇文章的核心判断是什么？一句话说得清吗？\n"
+            "2. 这个判断有机制解释吗（不仅仅是观察到现象，而是解释了为什么）？\n"
+            "3. 如果我是读者，读完后能告诉我朋友什么？\n"
+            "4. 这句判断换到半年前是否也成立？如果是，说明没有增量信息。\n"
+            "\n"
+            "然后做**情报扫描**：搜索当前讨论中已经有哪些类似观点，确保文章不是跟在别人后面说一样的话。只有当你的判断提供了不一样的东西（新机制、反常识、边界条件、具体案例）时才值得写。\n"
         )
         for i, ra in enumerate(recent_articles):
             date_str = f"（{ra['date']}）" if ra.get("date") else ""
@@ -780,6 +1271,53 @@ def write_article(
             "4. 只有当你确定'这个角度上面没有任何一篇文章触碰过'时，才是安全的。\n"
         )
 
+    # ══════════════════════════════════════════════════════════════
+    # 阶段 1：文章蓝图（方案 4.3）— 只生成蓝图，不写正文
+    # ══════════════════════════════════════════════════════════════
+    print("\n7️⃣  阶段1：生成文章蓝图...")
+    blueprint_messages = build_blueprint_prompt(context, angle_instruction)
+    bp_response = call_model(blueprint_messages, temperature=0.5, max_tokens=2048, model=model)
+    if not bp_response:
+        print("  ❌ 蓝图阶段模型无响应（不进入正文写作）")
+        return None
+    blueprint = extract_blueprint(bp_response)
+    if not blueprint:
+        print("  ❌ 蓝图无法解析为 JSON（不进入正文写作）")
+        print(f"     响应预览: {bp_response[:400]}")
+        return None
+    bp_check = validate_blueprint(blueprint)
+    if not bp_check["ok"]:
+        print(f"  ❌ 蓝图未通过校验，不进入正文写作:")
+        for r in bp_check["reasons"]:
+            print(f"       - {r}")
+        # 记录失败原因以便人工复核；不生成空文章、不入发布队列
+        print("  ⛔ 输出：不建议成文 / 待人工补足素材后重试")
+        return None
+    print(f"  ✓ 蓝图通过校验。核心判断: {_safe_str(blueprint.get('thesis'))[:50]}...")
+    _bp_json = json.dumps(blueprint, ensure_ascii=False, indent=2)
+    blueprint_context = f"""
+=== 已通过的写作蓝图（必须严格执行） ===
+{_bp_json}
+"""
+
+    user_prompt = f"""你已经有了经过校验的写作蓝图。请严格按照蓝图的 thesis / mechanism_chain / counterargument / boundary / outline 撰写完整正文。
+
+{blueprint_context}
+以下是我从信息源收集到的素材（结构化研究卡）。写作时必须服务于上面的 thesis，再安排素材；不要按原报告目录复述；不得补写素材中不存在的数字、案例、引语；对不确定内容使用"材料未能证明"，不要伪装成事实。
+
+1. 每节先推进判断，再解释证据和机制
+2. 至少有一处处理反方观点或边界
+3. 结尾回到核心判断，不用泛泛口号
+4. 标题必须表达判断，不得只是主题标签
+5. 用 Markdown 图片格式 `![描述](./images/image-NNN-xxx.jpeg)` 插入占位符
+6. 直接输出最终 Markdown 文章，以 # 标题开头，正文中禁止出现 T1/T2/T3/T4、ABC 分级等内部流程标记
+
+{angle_instruction}素材内容：
+{context}
+
+注意：直接输出完整的 Markdown 文章，以 # 标题开头。如果素材让你想到的判断与最近文章类似，一定要主动换方向。
+
+⚠️ 强制要求：你必须从以上素材中提取具体的数据、案例、判断来支撑文章论点。如果素材中没有对应的信息，不要自行杜撰数据或虚构案例。文章中必须有至少 2 处引用素材中的具体信息。"""
     user_prompt = f"""以下是我从信息源收集到的素材内容。请按照你的写作流程执行：
 
 1. 先判定这是路径 A（企业落地导向）还是路径 B（有意思的 AI 研究发现）
@@ -802,7 +1340,7 @@ def write_article(
         {"role": "user", "content": user_prompt},
     ]
 
-    response = call_model(messages, temperature=1.0, max_tokens=8192, model=model)
+    response = call_model(messages, temperature=1.0, max_tokens=None, model=model)
     if not response:
         print(f"  ❌ Model returned no response")
         return None
@@ -851,6 +1389,32 @@ def write_article(
         # Prepend title to article so polish/publish scripts can find it
         article = f"# {title}\n\n{article}"
         response = article
+
+    # ══════════════════════════════════════════════════════════════
+    # 文章质量闸门（方案 4.5）— 不通过则保留为待修草稿，不入发布队列
+    # ══════════════════════════════════════════════════════════════
+    quality = evaluate_article_quality(
+        article,
+        title=title,
+        source_map=_safe_source_map(blueprint),
+        blueprint_text=json.dumps(blueprint, ensure_ascii=False) if isinstance(blueprint, dict) else "",
+    )
+    _qc = quality["checks"]
+    _qstatus = quality.get("status", "rules")
+    print(f"\n🔍 质量闸门: {'✅ 通过' if quality['passed'] else '❌ 未通过'} "
+          f"(得分 {quality['score']}/8, 模式 {_qstatus})")
+    for k in ("has_thesis", "has_mechanism", "has_evidence", "has_counterpoint_or_boundary",
+              "has_source_traceability", "not_material_dump", "title_is_judgment", "no_empty_content"):
+        print(f"     {'✓' if _qc[k] else '✗'} {k}")
+    if quality.get("llm") and _qstatus != "rules":
+        _llm = quality["llm"]
+        print(f"     [LLM语义评估] verdict={_llm.get('verdict')} "
+              f"overall={_llm.get('overall_score')}/5: {_llm.get('overall_reason')}")
+        for _d, _v in (quality["llm"].get("dimensions") or {}).items():
+            print(f"        · {_d}: {_v.get('score')}/5 — {_v.get('reason')}")
+    for r in quality["reasons"]:
+        print(f"     ⚠️ {r}")
+
     title_slug = slugify(title)
 
     output_dir = OUTPUT_BASE / f"{date_str}-{title_slug}"
@@ -875,11 +1439,41 @@ def write_article(
     # Write digest as separate metadata file
     if digest:
         meta_path = output_dir / "meta.json"
-        import json
         meta_path.write_text(json.dumps({"digest": digest}, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"  ✓ Digest: {digest}")
     else:
         print(f"  ⚠️ No digest extracted (LLM didn't output '摘要:' line)")
+
+    # ── Persist blueprint + raw response + quality gate (方案 4.3/4.5) ──
+    # These artifacts let a human/agent audit why this article was written and
+    # whether the gate rejected/approved it. Never deleted; no publish side-effect.
+    try:
+        bp_path = output_dir / "blueprint.json"
+        bp_path.write_text(json.dumps(blueprint, ensure_ascii=False, indent=2), encoding="utf-8")
+        raw_path = output_dir / "_blueprint_raw_response.txt"
+        raw_path.write_text(bp_response or "", encoding="utf-8")
+        # Merge gate decision into meta.json (keeps digest too)
+        meta_path = output_dir / "meta.json"
+        meta = {}
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                meta = {}
+        meta["quality"] = {
+            "passed": quality["passed"],
+            "score": quality["score"],
+            "checks": quality["checks"],
+            "reasons": quality["reasons"],
+            "warnings": quality["warnings"],
+        }
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Standalone gate report too
+        qr_path = output_dir / "quality_report.json"
+        qr_path.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"  📋 蓝图 + 质量报告已保存: {output_dir}")
+    except Exception as _e:
+        print(f"  ⚠️ 保存蓝图/质量报告失败: {_e}")
 
     # ── Log article topic for diversity tracking ──
     # Collect cluster_ids from sampled materials for dedup tracking
@@ -894,7 +1488,13 @@ def write_article(
         output_dir,
         [s["url"] for s in sampled],
         cluster_ids=sampled_cluster_ids,
-        mark_source_urls=not bool(materials_override),
+        # 2026-08-02 修复 OlmoEarth 连续重选题根因：
+        # 之前 mark_source_urls=not bool(materials_override)，而每日管线
+        # runtime.py 恒以 --materials 调用本文，导致 materials_override=True
+        # → 永不为 False → 从不在 all_urls.tsv 标记 used →
+        # sample_materials 的 filter_used_materials 永远拦不住已用素材。
+        # 已用素材无论以何种方式写入都应标记 used，因此恒为 True。
+        mark_source_urls=True,
     )
 
     # Step 6: Polish article with OpenAI via OpenRouter
@@ -993,9 +1593,14 @@ def write_article(
 
     if num_placeholders > 0:
         queries = generate_image_search_queries(article, num_placeholders)
+        # Map placeholder description (alt text) per image index so the Pexels-first
+        # resolver can search using the actual caption rather than a generic query.
+        placeholder_descs = _extract_placeholder_alt_text(article)
         for i, query in enumerate(queries[:num_placeholders + 1], 1):
-            print(f"  Searching image {i}/{min(len(queries), num_placeholders + 1)}: '{query}'...")
-            success = run_image_search(query, str(images_dir), i)
+            desc = placeholder_descs.get(i, "")
+            print(f"  Searching image {i}/{min(len(queries), num_placeholders + 1)}: '{query}'"
+                  + (f" (desc: {desc[:24]}...)" if desc else ""))
+            success = run_image_search(query, str(images_dir), i, description=desc)
             if success:
                 print(f"    ✓ Images downloaded")
             else:
@@ -1072,73 +1677,10 @@ def write_article(
 
 
 def enqueue_for_publish(output_dir: str, digest: str = "") -> bool:
-    """Register a finished article for async publishing.
+    """Compatibility wrapper around the shared, lock-protected queue."""
+    from publish_queue import enqueue_for_publish as _enqueue
 
-    Appends one JSON line to queue/pending.jsonl. Idempotent per output_dir:
-    if the same article is already pending/done/failed, skip (no double publish).
-    """
-    try:
-        QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-        pending_file = QUEUE_DIR / "pending.jsonl"
-        done_file = QUEUE_DIR / "done.jsonl"
-        failed_file = QUEUE_DIR / "failed.jsonl"
-        for f in (pending_file, done_file, failed_file):
-            if f.exists():
-                for line in f.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if rec.get("output_dir") == str(output_dir):
-                        print(f"  ↺ Already queued/published ({f.name}); skip enqueue")
-                        return False
-        record = {
-            "output_dir": str(output_dir),
-            "article": "article.md",
-            "images_dir": "images",
-            "digest": digest,
-            "enqueued_at": datetime.datetime.now().isoformat(timespec="seconds"),
-        }
-        with pending_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        return True
-    except OSError as e:
-        print(f"  ⚠️ enqueue_for_publish failed: {e}")
-        return False
-
-
-def launch_publish_worker() -> bool:
-    """Fire-and-forget the publish worker in the background (detached).
-
-    Does NOT wait. The worker consumes the queue and creates WeChat drafts.
-    Returns True if it was launched.
-    """
-    if not WORKER_PATH.exists():
-        print(f"  ⚠️ publish_worker.py not found at {WORKER_PATH}; cannot auto-launch")
-        return False
-    try:
-        # P2-4: don't swallow the worker's output. Redirect to a log file
-        # (matches run_publish_worker.sh's logs/ convention) so auto-publish
-        # failures are diagnosable instead of silent.
-        log_dir = WORKER_PATH.parent / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = log_dir / f"publish_auto_{ts}.log"
-        log_fd = open(log_path, "a", encoding="utf-8")
-        subprocess.Popen(
-            [sys.executable, str(WORKER_PATH), "--once"],
-            start_new_session=True,
-            stdout=log_fd,
-            stderr=log_fd,
-        )
-        print(f"  🚀 Publish worker launched (log: {log_path})")
-        return True
-    except OSError as e:
-        print(f"  ⚠️ Failed to launch publish worker: {e}")
-        return False
+    return _enqueue(output_dir, digest)
 
 
 def main():
@@ -1181,25 +1723,28 @@ def main():
     output_dir = write_article(date_str, dry_run=args.dry_run, max_materials=args.max_materials, model=args.model, materials_override=materials_override)
 
     if output_dir:
-        # Decoupled, async publish: enqueue for the publish worker instead of
-        # blocking on wechat_publish.py here. The worker runs as a separate
-        # process (background-triggered now + a cron safety net) and creates
-        # the WeChat DRAFT only (no auto group-send — human review gate).
+        # Stage A ends at the queue boundary. An independently scheduled worker
+        # consumes the record and creates a WeChat draft; the writer never
+        # starts or waits for the sender.
         if not args.no_publish and not args.dry_run:
             digest = ""
+            quality_passed = True
             meta_path = Path(output_dir) / "meta.json"
             if meta_path.exists():
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                     digest = meta.get("digest", "")
+                    q = meta.get("quality") or {}
+                    quality_passed = bool(q.get("passed", True))
                 except (json.JSONDecodeError, OSError):
                     pass
-            if enqueue_for_publish(output_dir, digest):
+            # ⛔ 质量闸门（方案 4.5）：未通过的文章不自动进入发布队列。
+            if not quality_passed:
+                print("  ⛔ 质量闸门未通过 — 不进入发布队列，文章已作为待修草稿保留")
+                print(f"     Output preserved (待人工审核/补素材): {output_dir}")
+            elif enqueue_for_publish(output_dir, digest):
                 print(f"  📋 Queued for async publish (draft): {QUEUE_DIR / 'pending.jsonl'}")
-                if launch_publish_worker():
-                    print(f"  🚀 Publish worker launched in background")
-                else:
-                    print(f"  ⏳ Publish worker not auto-launched; will run on cron safety net")
+                print("  ⏳ Independent publish worker will consume the queue")
             else:
                 print(f"  ⚠️ Failed to enqueue for publish (see warnings above)")
 

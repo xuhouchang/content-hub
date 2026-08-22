@@ -89,10 +89,12 @@ rss:
     priority: medium
     topics: ["ai-agent", "engineering", "enterprise"]
 
-  - name: "AWS Machine Learning Blog"
-    url: "https://aws.amazon.com/blogs/machine-learning/feed/"
-    priority: high
-    topics: ["engineering", "cloud", "enterprise"]
+  # AWS Machine Learning Blog removed — vendor bias risk, single-vendor content
+  # leads to article reading like sponsored posts
+  # - name: "AWS Machine Learning Blog"
+  #   url: "https://aws.amazon.com/blogs/machine-learning/feed/"
+  #   priority: high
+  #   topics: ["engineering", "cloud", "enterprise"]
 
   - name: "Hugging Face Blog"
     url: "https://huggingface.co/blog/feed.xml"
@@ -148,6 +150,59 @@ rss:
 
   # John D. Cook Blog removed — pure C/Python/math topics, no AI enterprise coverage
 
+  # ── 新增 RSS 源 2026-07-12 ──
+  - name: "Stratechery (Ben Thompson)"
+    url: "https://stratechery.com/feed/"
+    priority: high
+    topics: ["strategy", "tech-business", "analysis"]
+    enabled: false  # 2026-08-02 停用：泛策略/科技商业分析，易漂移出「企业AI落地」
+
+  - name: "Lenny's Newsletter (Lenny Rachitsky)"
+    url: "https://www.lennysnewsletter.com/feed"
+    priority: high
+    topics: ["product", "growth", "leadership"]
+    enabled: false  # 2026-08-02 停用：泛增长/产品方法论信源
+
+  - name: "Andrew Chen"
+    url: "https://andrewchen.substack.com/feed"
+    priority: high
+    topics: ["startups", "growth", "network-effects"]
+    enabled: false  # 2026-08-02 停用：泛增长/初创信源
+
+  - name: "Elad Gil"
+    url: "https://blog.eladgil.com/feed"
+    priority: high
+    topics: ["startups", "strategy", "ai-frontier"]
+    enabled: false  # 2026-08-02 停用：泛初创/策略信源
+
+  - name: "SemiAnalysis (Dylan Patel)"
+    url: "https://newsletter.semianalysis.com/feed"
+    priority: high
+    topics: ["semiconductor", "infrastructure", "deep-tech"]
+    enabled: false  # 2026-08-02 停用：半导体/算力基础设施，非企业落地
+
+  - name: "Latent Space (AI Engineer Podcast)"
+    url: "https://latent.space/feed"
+    priority: high
+    topics: ["ai-engineering", "research", "interview"]
+
+  - name: "Hacker News Frontpage"
+    url: "https://hnrss.org/frontpage?count=15"
+    priority: medium
+    topics: ["tech-news", "discussion", "community"]
+    enabled: false  # 2026-08-02 停用：泛 tech 社区讨论，非企业AI定位
+
+  # ── AI 工程 / 产品真实应用 RSS（补充企业落地与工程信源，降低咨询/治理主导）──
+  - name: "Vercel AI Engineering"
+    url: "https://vercel.com/blog?tag=ai"
+    priority: medium
+    topics: ["ai-engineering", "product", "llm"]
+
+  - name: "Anyscale Engineering"
+    url: "https://www.anyscale.com/blog/rss.xml"
+    priority: medium
+    topics: ["ai-engineering", "runtime", "production"]
+
 # ── Company Blogs ──
 # 每天采集
 blogs:
@@ -197,6 +252,7 @@ blogs:
   - name: "Y Combinator"
     url: "https://www.ycombinator.com/blog/"
     topics: ["startups", "fundraising"]
+    enabled: false  # 2026-08-02 停用：创投/融资新闻，无企业落地价值
 
   # YC Startup School removed — JS-rendered page, consistently 0 links extracted
 
@@ -221,6 +277,7 @@ blogs:
   - name: "Intercom Blog"
     url: "https://www.intercom.com/blog"
     topics: ["customer-service", "ai-agent", "enterprise"]
+    enabled: false  # 2026-08-02 停用：偏泛客户服务SaaS营销内容
 
   - name: "Notion AI"
     url: "https://www.notion.com/blog/topic/artificial-intelligence"
@@ -239,12 +296,27 @@ blogs:
     url: "https://www.moveworks.com/us/en/resources/blog"
     topics: ["ai-agent", "enterprise", "conversational-ai"]
 
+  # ── AI 工程 / 产品落地博客（补充，含可复现步骤与业务结果）──
+  - name: "Writer AI Engineering"
+    url: "https://writer.com/engineering/"
+    topics: ["ai-engineering", "product", "workflow"]
+
+  - name: "Cursor Blog"
+    url: "https://www.cursor.com/blog"
+    topics: ["ai-engineering", "product", "delivery"]
+
+  - name: "Ramp Engineering Blog"
+    url: "https://www.ramp.com/blog/engineering"
+    topics: ["ai-engineering", "agent", "production"]
+
   # Microsoft .NET Agent Blog removed per request
 
 # ── Consulting Reports ──
-# 仅在星期一采集
-# 不会直接抓取页面，而是生成搜索查询 → 由 LLM filter 翻查
+# 每天采集（原先仅有周一，改为每天后可以提高企业端内容供给）
+# 搜索查询通过 Serper API 执行
 consulting:
+  enabled: true
+  run_daily: true
   firms:
     - "McKinsey"
     - "BCG"
@@ -259,38 +331,74 @@ consulting:
     - "CB Insights"
 
   search_queries:
-    - '"{firm}" "enterprise AI" adoption report {month} {year}'
-    - '"{firm}" AI workforce OR reskilling report'
-    - '"{firm}" artificial intelligence organizational impact report'
+    - '"{firm}" "enterprise AI" implementation case study deployment'
+    - '"{firm}" enterprise AI ROI OR cost savings OR automation results'
+    - '"{firm}" AI workflow OR process redesign business results'
+    - '"{firm}" AI workforce OR reskilling organizational landing report'
+    - '"enterprise AI" "case study" deployment metrics'
+    - '"AI agent" production enterprise rollout results'
+    - '"generative AI" enterprise measurable outcome case'
+    - '"AI implementation" lessons learned enterprise real world'
 
 # ── Think Tank / Management Journals ──
-# 仅在星期一采集
+# 每天采集
 thinktank:
-  - name: "MIT Sloan Management Review AI"
-    url: "https://sloanreview.mit.edu/tag/artificial-intelligence/"
-    type: list_page
-    topics: ["management", "ai-adoption", "organization"]
+  enabled: true
+  run_daily: true
+  sources:
+    - name: "MIT Sloan Management Review AI"
+      url: "https://sloanreview.mit.edu/tag/artificial-intelligence/"
+      type: list_page
+      topics: ["management", "ai-adoption", "organization"]
 
-  - name: "HBR AI"
-    url: "https://hbr.org/topic/subject/technology-and-analytics/artificial-intelligence"
-    type: list_page
-    topics: ["management", "ai-adoption", "strategy"]
+    - name: "HBR AI"
+      url: "https://hbr.org/topic/subject/technology-and-analytics/artificial-intelligence"
+      type: list_page
+      topics: ["management", "ai-adoption", "strategy"]
 
-  - name: "Knowledge at Wharton"
-    url: "https://knowledge.wharton.upenn.edu/"
-    type: list_page
-    topics: ["management", "business", "ai"]
+    - name: "Knowledge at Wharton"
+      url: "https://knowledge.wharton.upenn.edu/"
+      type: list_page
 
-  - name: "RAND Corporation AI"
-    url: "https://www.rand.org/topics/artificial-intelligence.html"
-    type: list_page
-    topics: ["policy", "security", "defense"]
+    - name: "RAND Corporation AI"
+      url: "https://www.rand.org/topics/artificial-intelligence.html"
+      type: list_page
+      topics: ["policy", "security", "defense"]
 
 # ── Podcasts ──
-# 仅在星期一采集（目前采集源不稳定，建议跳过）
-# podcast:
-#   - name: "HBR Podcasts"
-#     search_query: "..."
+# 每天采集，通过 YouTube RSS + podcast RSS feed 获取
+# 频道配置在 content_platform/ingest/cases.py 中，也可在此扩展
+podcast:
+  youtube_channels:
+    - name: "a16z Podcast"
+      channel_id: "UC9cn0TuPq4dnbTY-CBsm8XA"
+      max_items: 3
+    - name: "Y Combinator"
+      channel_id: "UCcefcZRL2oaA_uBNeo5UOWg"
+      max_items: 3
+    - name: "Lenny's Podcast"
+      channel_id: "UC6t1O76G0jYXOAoYCm153dA"
+      max_items: 3
+    - name: "Lex Fridman Podcast"
+      channel_id: "UCSHZKyawb77ixDdsGog4iWA"
+      max_items: 3
+    - name: "No Priors"
+      channel_id: "UC8xhQqFwHpdK_RIvKQxl5wg"
+      max_items: 3
+    - name: "Cognitive Revolution"
+      channel_id: "UC_WB11JIBPxWS8JhFiys-4Q"
+      max_items: 3
+
+  rss_feeds:
+    - name: "Latent Space"
+      url: "https://latent.space/feed"
+      max_items: 3
+    - name: "The AI in Business (Emerj)"
+      url: "https://emerj.com/feed/"
+      max_items: 3
+    - name: "Practical AI (Changelog)"
+      url: "https://changelog.com/practicalai/feed"
+      max_items: 3
 
 # ── Filtering Rules ──
 # 定义内容相关度过滤的各个分类。每个分类指定关键词和权重。
@@ -298,29 +406,34 @@ thinktank:
 filtering:
   rules:
     - id: "enterprise-ai-adoption"
-      label: "AI在企业中的实际落地"
-      weight: 80
-      keywords: ["deployment", "adoption", "implementation", "ROI", "workflow"]
+      label: "AI在企业中的实际落地（主轴）"
+      weight: 90
+      keywords: ["deployment", "adoption", "implementation", "ROI", "workflow", "automation rate", "cost savings", "measured", "metrics"]
+
+    - id: "case-study"
+      label: "企业AI落地案例"
+      weight: 95
+      keywords: ["case study", "real-world", "production", "deployment", "lessons learned", "go live", "piloted"]
+
+    - id: "ai-engineering-product"
+      label: "AI工程/产品与真实应用"
+      weight: 85
+      keywords: ["AI engineering", "LLM app", "agent", "product", "prompt engineering", "system prompt", "retrieval", "production"]
 
     - id: "org-talent"
-      label: "组织/人才/绩效"
+      label: "组织/人才/绩效（落地辅助）"
       weight: 80
-      keywords: ["workforce", "reskilling", "organization", "culture", "leadership"]
-
-    - id: "ai-governance"
-      label: "AI治理与风险合规"
-      weight: 70
-      keywords: ["risk", "compliance", "safety", "regulation", "governance"]
+      keywords: ["workforce", "reskilling", "organization", "culture", "leadership", "role change"]
 
     - id: "technical-architecture"
       label: "AI系统建设/架构"
       weight: 60
       keywords: ["infrastructure", "architecture", "LLM", "training", "deployment"]
 
-    - id: "case-study"
-      label: "企业AI落地案例"
-      weight: 90
-      keywords: ["case study", "real-world", "production", "deployment"]
+    - id: "ai-governance"
+      label: "AI治理与风险合规（仅作落地辅助，不作主轴高分）"
+      weight: 40
+      keywords: ["risk", "compliance", "safety", "regulation", "governance"]
 
     - id: "surprising-research"
       label: "反常识AI研究"

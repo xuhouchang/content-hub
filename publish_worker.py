@@ -7,20 +7,21 @@ process and creates the WeChat DRAFT (no auto group-send — human review gate).
 
 Design notes:
 - Reads queue/pending.jsonl, publishes each, then moves the record to
-  queue/done.jsonl (with media_id) or queue/failed.jsonl (with error).
+  queue/done.jsonl (with media_id). Failures retry with backoff before the
+  terminal queue/failed.jsonl state.
 - Idempotent: a record already in done/failed is never republished.
-- A file lock serializes concurrent workers (background trigger + cron net).
+- Separate worker and queue locks serialize consumers and producer mutations.
 - wechat_publish.py is invoked WITHOUT a tight parent timeout and WITHOUT
   --publish, so it manages its own per-image timeouts and only drafts.
 
 Usage:
-  python3 publish_worker.py --once      # process queue and exit
-  python3 publish_worker.py --daemon    # loop forever (service mode)
+  python3 publish_worker.py --once              # process queue and exit
+  python3 publish_worker.py --once --quiet-empty # cron mode
+  python3 publish_worker.py --daemon            # service mode
 """
 import argparse
 import datetime
 import fcntl
-import json
 import os
 import re
 import subprocess
@@ -28,52 +29,46 @@ import sys
 import time
 from pathlib import Path
 
+from publish_queue import (
+    DONE,
+    FAILED,
+    PENDING,
+    PROCESSING,
+    QUEUE_DIR,
+    append_record_unlocked,
+    queue_lock,
+    read_records_unlocked,
+    write_records_unlocked,
+)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
-QUEUE_DIR = SCRIPT_DIR / "queue"
-PENDING = QUEUE_DIR / "pending.jsonl"
-DONE = QUEUE_DIR / "done.jsonl"
-FAILED = QUEUE_DIR / "failed.jsonl"
-PROCESSING = QUEUE_DIR / "processing.jsonl"  # P2-5: in-progress marker
 LOCK = QUEUE_DIR / ".worker.lock"
 WECHAT_PUBLISH = SCRIPT_DIR / "wechat_publish.py"
 
 # Generous parent timeout: wechat_publish.py handles its own per-image
 # timeouts + fault tolerance now, so we only guard against a total hang.
 PARENT_TIMEOUT = 900
+MAX_ATTEMPTS = 3
+BASE_RETRY_SECONDS = 300
 
 
 def _ts() -> str:
-    return datetime.datetime.now().isoformat(timespec="seconds")
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def _load_pending() -> list:
-    if not PENDING.exists():
-        return []
-    records = []
-    for line in PENDING.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return records
+    with queue_lock():
+        return read_records_unlocked(PENDING)
 
 
 def _done_set() -> set:
-    s = set()
-    for f in (DONE, FAILED):
-        if f.exists():
-            for line in f.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    s.add(json.loads(line).get("output_dir"))
-                except json.JSONDecodeError:
-                    continue
-    return s
+    with queue_lock():
+        return {
+            record.get("output_dir")
+            for path in (DONE, FAILED)
+            for record in read_records_unlocked(path)
+            if record.get("output_dir")
+        }
 
 
 def _publish_one(rec: dict):
@@ -102,38 +97,21 @@ def _publish_one(rec: dict):
     m = re.search(r"DRAFT_MEDIA_ID=(\S+)", out)
     if m:
         media_id = m.group(1)
+    if not media_id:
+        raise RuntimeError("wechat_publish succeeded without DRAFT_MEDIA_ID marker")
     return media_id, out
 
 
 def _move(rec: dict, target: Path, extra: dict):
-    target.parent.mkdir(parents=True, exist_ok=True)
-    rec.update(extra)
-    with target.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-
-def _rebuild_pending(records: list):
-    done = _done_set()
-    kept = [r for r in records if r.get("output_dir") not in done]
-    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    with PENDING.open("w", encoding="utf-8") as f:
-        for r in kept:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    moved = dict(rec)
+    moved.update(extra)
+    with queue_lock():
+        append_record_unlocked(target, moved)
 
 
 def _load_processing() -> list:
-    if not PROCESSING.exists():
-        return []
-    recs = []
-    for line in PROCESSING.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            recs.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return recs
+    with queue_lock():
+        return read_records_unlocked(PROCESSING)
 
 
 def _rebuild_pending_excluding(output_dir: str):
@@ -143,42 +121,38 @@ def _rebuild_pending_excluding(output_dir: str):
     crash between draft creation and marking-done cannot re-enqueue the same
     article and create a duplicate WeChat draft.
     """
-    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    if not PENDING.exists():
-        return
-    kept = []
-    for line in PENDING.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            kept.append(line)
-            continue
-        if r.get("output_dir") == output_dir:
-            continue
-        kept.append(line)
-    with PENDING.open("w", encoding="utf-8") as f:
-        for l in kept:
-            f.write(l + "\n")
+    with queue_lock():
+        kept = [
+            record
+            for record in read_records_unlocked(PENDING)
+            if record.get("output_dir") != output_dir
+        ]
+        write_records_unlocked(PENDING, kept)
 
 
 def _mark_processing(rec: dict):
     """Move a record from pending into the in-progress file."""
-    _rebuild_pending_excluding(rec.get("output_dir", ""))
-    with PROCESSING.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    output_dir = rec.get("output_dir", "")
+    with queue_lock():
+        kept = [
+            record
+            for record in read_records_unlocked(PENDING)
+            if record.get("output_dir") != output_dir
+        ]
+        write_records_unlocked(PENDING, kept)
+        append_record_unlocked(PROCESSING, rec)
 
 
 def _unmark_processing(rec: dict):
     """Remove a record from the in-progress file after it is resolved."""
     od = rec.get("output_dir", "")
-    recs = [r for r in _load_processing() if r.get("output_dir") != od]
-    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    with PROCESSING.open("w", encoding="utf-8") as f:
-        for r in recs:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    with queue_lock():
+        recs = [
+            record
+            for record in read_records_unlocked(PROCESSING)
+            if record.get("output_dir") != od
+        ]
+        write_records_unlocked(PROCESSING, recs)
 
 
 def _patch_processing_media_id(output_dir: str, media_id: str):
@@ -187,17 +161,15 @@ def _patch_processing_media_id(output_dir: str, media_id: str):
     R2: lets a crash between draft creation and _move() to done be self-healed
     (reuse the media_id) instead of leaving a stuck/duplicate entry.
     """
-    recs = _load_processing()
-    changed = False
-    for r in recs:
-        if r.get("output_dir") == output_dir:
-            r["media_id"] = media_id
-            changed = True
-    if changed:
-        QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-        with PROCESSING.open("w", encoding="utf-8") as f:
-            for r in recs:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    with queue_lock():
+        recs = read_records_unlocked(PROCESSING)
+        changed = False
+        for record in recs:
+            if record.get("output_dir") == output_dir:
+                record["media_id"] = media_id
+                changed = True
+        if changed:
+            write_records_unlocked(PROCESSING, recs)
 
 
 def _check_processing_leftovers():
@@ -229,6 +201,7 @@ def _check_processing_leftovers():
     for rec in recs:
         od = rec.get("output_dir", "")
         if od in _done_set():
+            healed += 1
             continue  # already resolved elsewhere; skip
         media_id = rec.get("media_id", "")
         if media_id:
@@ -243,8 +216,22 @@ def _check_processing_leftovers():
     if healed:
         # Drain the stale in-progress file now that everything is re-homed.
         QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-        PROCESSING.write_text("", encoding="utf-8")
+        with queue_lock():
+            write_records_unlocked(PROCESSING, [])
         print(f"[{_ts()}] 🩹 Self-healed {healed} crashed-publish record(s).")
+
+
+def _retry_ready(rec: dict) -> bool:
+    next_attempt = rec.get("next_attempt_at")
+    if not next_attempt:
+        return True
+    try:
+        scheduled = datetime.datetime.fromisoformat(next_attempt)
+        if scheduled.tzinfo is None:
+            scheduled = scheduled.astimezone()
+        return scheduled <= datetime.datetime.now().astimezone()
+    except (TypeError, ValueError):
+        return True
 
 
 def _acquire_lock():
@@ -258,7 +245,7 @@ def _acquire_lock():
     return fd
 
 
-def process_once() -> int:
+def process_once(quiet_empty: bool = False) -> int:
     fd = _acquire_lock()
     if fd is None:
         print(f"[{_ts()}] ⚠️ Another publish worker is running; skipping this run")
@@ -268,13 +255,17 @@ def process_once() -> int:
         _check_processing_leftovers()
         records = _load_pending()
         if not records:
-            print(f"[{_ts()}] Queue empty. Nothing to publish.")
+            if not quiet_empty:
+                print(f"[{_ts()}] Queue empty. Nothing to publish.")
             return 0
         processed = 0
         for rec in records:
             od = rec.get("output_dir", "")
             if od in _done_set():
+                _rebuild_pending_excluding(od)
                 continue  # safety: never double-publish
+            if not _retry_ready(rec):
+                continue
             # P2-5: pull out of pending BEFORE publishing so a crash between
             # draft creation and marking-done cannot re-enqueue it (no dup draft).
             _mark_processing(rec)
@@ -289,11 +280,33 @@ def process_once() -> int:
                 print(f"[{_ts()}] ✅ Draft created: {od} (media_id={media_id[:12]}...)")
                 processed += 1
             except Exception as e:
-                _move(rec, FAILED, {"error": str(e)[:500], "finished_at": _ts()})
-                print(f"[{_ts()}] ❌ Failed: {od}: {e}")
+                attempts = int(rec.get("attempts", 0)) + 1
+                error = str(e)[:500]
+                if attempts < MAX_ATTEMPTS:
+                    delay = BASE_RETRY_SECONDS * (2 ** (attempts - 1))
+                    next_attempt = datetime.datetime.now().astimezone() + datetime.timedelta(seconds=delay)
+                    _move(
+                        rec,
+                        PENDING,
+                        {
+                            "attempts": attempts,
+                            "last_error": error,
+                            "next_attempt_at": next_attempt.isoformat(timespec="seconds"),
+                        },
+                    )
+                    print(
+                        f"[{_ts()}] 🔁 Retry {attempts}/{MAX_ATTEMPTS - 1} "
+                        f"scheduled in {delay}s: {od}: {error}"
+                    )
+                else:
+                    _move(
+                        rec,
+                        FAILED,
+                        {"attempts": attempts, "error": error, "finished_at": _ts()},
+                    )
+                    print(f"[{_ts()}] ❌ Failed permanently after {attempts} attempts: {od}: {error}")
             finally:
                 _unmark_processing(rec)
-        _rebuild_pending(records)
         return processed
     finally:
         try:
@@ -308,19 +321,21 @@ def main():
     parser.add_argument("--once", action="store_true", help="Process queue once and exit")
     parser.add_argument("--daemon", action="store_true", help="Loop forever")
     parser.add_argument("--interval", type=int, default=300, help="Daemon poll interval (s)")
+    parser.add_argument("--quiet-empty", action="store_true", help="Do not log empty queue passes")
     args = parser.parse_args()
 
     if args.daemon:
         print(f"[{_ts()}] Publish worker daemon started (interval={args.interval}s)")
         while True:
             try:
-                process_once()
+                process_once(quiet_empty=args.quiet_empty)
             except Exception as e:
                 print(f"[{_ts()}] worker error: {e}")
             time.sleep(args.interval)
     else:
-        n = process_once()
-        print(f"[{_ts()}] Publish worker done. Processed {n} article(s).")
+        n = process_once(quiet_empty=args.quiet_empty)
+        if n or not args.quiet_empty:
+            print(f"[{_ts()}] Publish worker done. Processed {n} article(s).")
 
 
 if __name__ == "__main__":
