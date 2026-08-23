@@ -10,10 +10,8 @@ __pycache__/
 .worktrees/
 memory/
 logs/
-platform/datasets/
-collector/data/
-collector/logs/
-collector/.env
+tmp/
+/platform/
 
 # Article output dirs
 wechat-articles/

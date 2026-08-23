@@ -16,6 +16,7 @@ from content_platform.datasets.case_pool import build_case_pool
 from content_platform.ingest.blogs import load_blog_materials
 from content_platform.ingest.cases import load_case_materials
 from content_platform.ingest.consulting import load_consulting_materials
+from content_platform.ingest.reddit import load_reddit_materials
 from content_platform.ingest.rss import load_rss_materials
 from content_platform.job_state import JobStateStore
 from content_platform.normalize.canonicalize import build_material_record
@@ -55,7 +56,7 @@ def _save_tag_db(tags: dict) -> None:
 def _build_tag_definitions() -> str:
     """Build compact dimension definitions for the LLM prompt."""
     try:
-        sys.path.insert(0, str(_TAG_FILE.parent.parent / "collector"))
+        sys.path.insert(0, str(_TAG_FILE.parent.parent))
         from tag_schema import TAG_SCHEMA
     except Exception:
         # Inline fallback if tag_schema not available
@@ -244,7 +245,10 @@ def load_curated_cache(date_str: str, paths: PlatformPaths) -> dict[str, dict]:
 
 def _merge_into_global_cache(global_cache_file: Path, new_items: list[dict]) -> None:
     """Merge newly scored items into the global cross-day cache, keyed by URL."""
-    existing = read_json(global_cache_file)
+    try:
+        existing = read_json(global_cache_file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        existing = None
     if not existing or not isinstance(existing, list):
         existing = []
     seen = set()
@@ -283,14 +287,27 @@ def _curate_materials(
     
     # Load existing curated cache to skip re-scoring
     cache = load_curated_cache(date_str, paths)
-    
+
+    # ── 跨天积累：全局缓存中的历史素材全部进入候选池 ──
+    # 之前只有「当天新采集且命中缓存」的素材会被复用，全局缓存里其余
+    # 历史素材从未进过选题池——跨天积累形同虚设。现在把已打分的
+    # 历史素材全部并入 curated 列表，让选题面随天数增厚。
+    cached_items = [
+        v
+        for v in cache.values()
+        if v.get("editorial_fit_score", 0.0) > 0
+    ]
+    seen_fps = {_fingerprint(m) for m in cached_items}
+
     # Split into new vs cached
     new_materials = []
-    cached_items = []
     for m in raw_materials:
         fp = _fingerprint(m)
+        if fp in seen_fps:
+            continue
         if fp in cache:
             cached_items.append(cache[fp])
+            seen_fps.add(fp)
         else:
             new_materials.append(m)
     
@@ -397,6 +414,7 @@ def run_collect_daily(
     if raw_materials is None:
         raw_materials = []
         raw_materials.extend(load_rss_materials(date_str))
+        raw_materials.extend(load_reddit_materials(date_str))
         raw_materials.extend(load_blog_materials(date_str))
         raw_materials.extend(load_consulting_materials(date_str))
         raw_materials.extend(load_case_materials(date_str))
@@ -413,9 +431,12 @@ def run_collect_daily(
     write_json(paths.datasets_dir(date_str) / "curated_cache.json", curated_materials)
     
     # Also merge into the global cross-day cache
+    # NOTE: no `exists()` guard here — _merge_into_global_cache handles a
+    # missing file (starts from an empty list). A guard would prevent the
+    # file from ever being created on the first run, breaking cross-day
+    # material accumulation entirely.
     global_cache_file = paths.platform_dir / "datasets" / "curated_cache_all.json"
-    if global_cache_file.exists():
-        _merge_into_global_cache(global_cache_file, curated_materials)
+    _merge_into_global_cache(global_cache_file, curated_materials)
 
     job["steps"] = [
         {"name": "collect_sources", "status": "success"},

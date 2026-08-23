@@ -1,10 +1,13 @@
 import time
 
 from lib import fetch_url
+from lib import get_sources
 from lib import guess_relevance_reason
 from lib import is_duplicate
 from lib import load_url_registry
 from lib import quick_relevance_check
+from lib.page_utils import extract_links_from_html
+from lib.page_utils import extract_page_summary
 
 
 BLOG_SOURCES = None
@@ -18,29 +21,9 @@ def _get_blog_sources() -> list[dict]:
     if BLOG_SOURCES is not None:
         return BLOG_SOURCES
     try:
-        from collect_blogs import BLOG_SOURCES as configured_sources
-    except ModuleNotFoundError:
+        return get_sources("blogs")
+    except (ModuleNotFoundError, FileNotFoundError):
         return []
-
-    return configured_sources
-
-
-def extract_links_from_html(html_text: str, base_url: str, source_name: str) -> list[dict]:
-    try:
-        from collect_blogs import extract_links_from_html as collect_blog_links
-    except ModuleNotFoundError:
-        return []
-
-    return collect_blog_links(html_text, base_url, source_name)
-
-
-def extract_page_summary(html: str, max_chars: int = 2000) -> str:
-    try:
-        from collect_blogs import extract_page_summary as collect_page_summary
-    except ModuleNotFoundError:
-        return html[:max_chars]
-
-    return collect_page_summary(html, max_chars=max_chars)
 
 
 def load_blog_materials(date_str: str) -> list[dict]:

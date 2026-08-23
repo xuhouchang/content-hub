@@ -137,10 +137,41 @@ def pick_top_n_clusters(
         reverse=True,
     )
 
+    # ── 段位重排：对 top-K 候选做决策者洞察排序 ──
+    # 素材分高（执行细节丰富）≠ 段位高（面向老板的普适洞察）。
+    # 先按 editorial_fit 取 top-K 个不同 cluster，再用 LLM 按 executive
+    # value 重排，让"能升维"的选题优先于"细节最丰富"的选题。
+    top_k = 8
+    top_candidates: list[dict] = []
+    seen: set[str] = set()
+    for m in sorted_candidates:
+        cluster_id = m.get("dedup", {}).get("cluster_id", "")
+        key = cluster_id or (m.get("canonical_url", "") or m.get("url", ""))
+        if key and key in seen:
+            continue
+        seen.add(key)
+        top_candidates.append(m)
+        if len(top_candidates) >= top_k:
+            break
+
+    if len(top_candidates) > n:
+        exec_scores = _llm_rank_executive_value(top_candidates, model=model)
+        if exec_scores:
+            top_candidates.sort(
+                key=lambda m: exec_scores.get(m.get("canonical_url", "") or m.get("url", ""), -1.0),
+                reverse=True,
+            )
+            print(f"  🎯 Executive-value ranking applied to {len(top_candidates)} candidates")
+            for m in top_candidates:
+                url = m.get("canonical_url", "") or m.get("url", "")
+                print(f"    • {exec_scores.get(url, 0.0):.1f} — {m.get('title', '')[:55]}")
+        else:
+            print("  ⚠️ Executive-value ranking unavailable; using editorial_fit order")
+
     selected: list[dict] = []
     seen_clusters: set[str] = set()
 
-    for m in sorted_candidates:
+    for m in top_candidates:
         if len(selected) >= n:
             break
 
@@ -181,6 +212,89 @@ def pick_top_n_clusters(
         print(f"    - [{cluster}] {s.get('title', '')[:60]}")
 
     return selected
+
+
+def _llm_rank_executive_value(candidates: list[dict], model: str = "deepseek-v4-flash") -> dict[str, float]:
+    """Ask the LLM to score the executive-insight (段位) value of candidates.
+
+    Returns {url: executive_score(0-10)}. A high score means the candidate can
+    support a high-caliber article for enterprise-AI decision makers — one
+    that extracts a transferable mechanism/judgment (not just case storytelling).
+
+    Used to re-rank the top candidates so the strongest editorial_fit material
+    doesn't automatically win: 段位 beats 细节.
+    """
+    if not candidates:
+        return {}
+
+    lines = []
+    for i, m in enumerate(candidates, 1):
+        url = m.get("canonical_url", "") or m.get("url", "")
+        lines.append(
+            f"{i}. 标题: {m.get('title', '')}\n"
+            f"   来源: {m.get('source_name', '')} ({m.get('source_type', '')})\n"
+            f"   摘要: {(m.get('summary', '') or '')[:300]}\n"
+            f"   URL: {url}"
+        )
+    candidates_text = "\n\n".join(lines)
+
+    prompt = f"""你是一位面向「企业AI落地决策者」（老板/高管/业务负责人）的内容主编。下面的候选素材将用来写公众号文章，请评估每个候选的「段位」——即它能支撑的这篇文章的高度。
+
+**本号选题主轴（唯一）：企业AI怎么落地。** 老板关心的是"我的企业怎么把AI落下去"：该不该投、先投哪个环节、业务流程怎么变、组织/绩效/人才怎么配套、ROI怎么度量、有什么代价和坑。**AI行业的技术/产业趋势（合成数据、模型能力、算力、评测基准）不是本号主轴，除非直接落到"企业怎么落地"。**
+
+高段位文章的判断标准：
+1. 能提炼出**可迁移的落地机制/规律**：脱离具体案例、对同类企业普遍成立的落地判断（例如"AI项目失败的主因是组织而非技术""业务流程不重构，提效只会局部化""绩效制度必须跟着业务流程变"）
+2. 有明确的**落地决策含义**：能回答决策者的问题——该不该投、先投哪、组织怎么配、ROI怎么量、什么环节必须留人
+3. 案例/数据只是**证据**，不是文章主角
+4. 低段位文章：停留在"某个case讲了什么""某工具怎么搭""某公司做了什么"；**或主题是AI技术/产业趋势（非落地主轴）**
+
+=== 候选素材 ===
+{candidates_text}
+
+=== 任务 ===
+对每个候选输出 executive_score（0-10，一位小数）和一句话理由。
+- 9-10：落地机制+决策含义都清晰，可直接写高段位落地文章
+- 7-8：有可提炼的落地洞察，但需要写作时升维
+- 4-6：有一定价值，但更偏执行细节/具体case，或主题是AI技术趋势
+- 0-3：纯技术/纯新闻/纯case描述，或AI行业趋势（非落地主轴），无落地决策含义
+
+只输出 JSON 数组，按候选顺序：
+```json
+[
+  {{"url": "候选URL", "executive_score": 8.5, "reason": "一句话理由"}}
+]
+```"""
+
+    sys.path.insert(0, str(RECENT_TOPICS_FILE.parent.parent))
+    from lib.llm import call_model
+
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        resp = call_model(messages, model=model, temperature=0.2, max_tokens=2048)
+    except Exception as e:
+        print(f"  ⚠️ Executive-value ranking failed: {e}")
+        return {}
+    if not resp or not resp.strip():
+        return {}
+
+    json_match = re.search(r"```(?:json)?\n(.*?)\n```", resp, re.DOTALL)
+    json_str = json_match.group(1) if json_match else resp.strip()
+    try:
+        results = json.loads(json_str)
+        if not isinstance(results, list):
+            return {}
+    except json.JSONDecodeError:
+        return {}
+
+    scores = {}
+    for r in results:
+        url = r.get("url", "")
+        if url:
+            try:
+                scores[url] = float(r.get("executive_score", 0.0))
+            except (TypeError, ValueError):
+                scores[url] = 0.0
+    return scores
 
 
 # ── Legacy compatibility wrapper ──

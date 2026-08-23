@@ -3,13 +3,13 @@ import urllib.request
 
 import feedparser
 
-from collect_blogs import extract_page_summary
 from lib import fetch_url
 from lib import guess_relevance_reason
 from lib import is_duplicate
 from lib import load_url_registry
 from lib import get_sources
 from lib import quick_relevance_check
+from lib.page_utils import extract_page_summary
 
 
 RSS_FEEDS = None

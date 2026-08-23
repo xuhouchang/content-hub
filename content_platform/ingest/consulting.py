@@ -6,6 +6,9 @@ from lib import is_monday
 from lib import load_sources
 from lib import load_url_registry
 from lib import quick_relevance_check
+from lib.page_utils import extract_article_links
+from lib.page_utils import fetch_page
+from lib.page_utils import serper_search
 
 
 MONTH_NAMES = {
@@ -22,33 +25,6 @@ MONTH_NAMES = {
     11: "November",
     12: "December",
 }
-
-
-def fetch_page(url: str) -> str | None:
-    try:
-        from collect_consulting import fetch_page as collect_consulting_page
-    except ModuleNotFoundError:
-        return None
-
-    return collect_consulting_page(url)
-
-
-def extract_article_links(html_text: str, base_url: str, source_name: str) -> list[dict]:
-    try:
-        from collect_consulting import extract_article_links as collect_article_links
-    except ModuleNotFoundError:
-        return []
-
-    return collect_article_links(html_text, base_url, source_name)
-
-
-def serper_search(queries: list[str], api_key: str, num_days: str = "m") -> list[dict]:
-    try:
-        from collect_consulting import serper_search as collect_consulting_search
-    except ModuleNotFoundError:
-        return []
-
-    return collect_consulting_search(queries, api_key, num_days=num_days)
 
 
 def load_consulting_materials(date_str: str, force: bool = False) -> list[dict]:
