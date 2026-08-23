@@ -29,8 +29,6 @@ python3 platform_cli.py run cleanup --date 2026-06-03
 - `case-daily` 从同日 `platform/datasets/case_pool.json` 读取候选，再调用旧 `decompose_case_study.py` 负责写作
 - `cleanup` 清理 30 天前的中间产物
 
-旧脚本仍在仓库里，但它们不再是推荐的主调度入口。
-
 ## 架构概览
 
 ```
@@ -55,80 +53,86 @@ platform/
 ## 目录结构
 
 ```
-collector/
-├── run_all.sh                  # 总管线入口（cron 05:00）
-├── run_daily_full.sh           # 每日文章 + Medium（cron 06:00）
-├── run_daily_article.sh        # 仅文章生成入口（手动/备用）
-├── run_daily_case.sh           # 仅案例拆解入口（cron 10:00）
-├── run_publish_worker.sh       # 独立草稿发布 worker（cron 每5分钟）
-├── run_wechat_stats.sh         # 数据分析管线（手动触发）
+├── platform_cli.py               # 内容中台CLI入口（run collect-daily / article-daily / case-daily / cleanup）
+├── content_platform/             # 内容中台（当前主链路）
+│   ├── cli.py                    # argparse CLI 定义
+│   ├── runtime.py                # job 编排：collect-daily（采集→打标→聚类→打分→素材池）
+│   ├── ingest/                   # 采集层 loader（每个来源一个模块，读 sources.yaml）
+│   │   ├── rss.py                # RSS源采集
+│   │   ├── reddit.py             # Reddit热门讨论采集
+│   │   ├── blogs.py              # AI公司博客采集
+│   │   ├── consulting.py         # 咨询报告 + 智库采集
+│   │   └── cases.py              # 案例/播客素材
+│   ├── normalize/                # URL规范化 + 素材记录构建
+│   ├── curate/                   # 聚类、LLM打分
+│   ├── datasets/                 # article_pool / case_pool
+│   ├── business/                 # 文章/案例管线编排
+│   └── paths.py / storage/       # 路径与JSON存取
 │
-├── collect.py                  # 统一CLI（可替代各collect_*.py独立调用）
-├── collect_rss.py              # RSS源采集（Phase 1 part 1）
-├── collect_blogs.py            # AI公司博客采集（Phase 1 part 2）
-├── collect_consulting.py       # 咨询报告采集（Phase 1 part 3，仅周一）
-├── collect_podcasts.py         # 播客节目采集（Phase 1 part 4，仅周一）
+├── run_all.sh                    # 总采集入口（cron 05:00 → collect-daily + cleanup）
+├── run_daily_full.sh             # 每日文章 + Medium（cron 06:00）
+├── run_daily_article.sh          # 仅文章生成入口（cron 06:00）
+├── run_daily_case.sh             # 仅案例拆解入口（cron 10:00）
+├── run_publish_worker.sh         # 独立草稿发布 worker（cron 每5分钟）
+├── run_daily_article_publish.sh  # 发布 worker（手动/备用）
+├── run_daily_article_writeonly.sh# 仅写作不入队（手动）
+├── run_medium_article.sh         # Medium 文章入口
+├── run_wechat_stats.sh           # 微信数据分析管线（手动触发）
 │
-├── filter_items.py             # LLM过滤素材（Phase 2）
-├── poll_and_save.py            # 轮询过滤结果并保存（Phase 3）
+├── write_article.py              # 公众号文章写作（选题→正文→配图→入队）
+├── write_medium_article.py       # Medium 英文文章写作
+├── decompose_case_study.py       # 每日案例拆解管线
+├── synthesize_weekly.py          # 周报合成
+├── framework_article.py          # 框架/方法论文章（骨架版，未启用cron）
+├── polish_article.py             # 文章润色
+├── embed_images.py               # IMAGE占位符替换（fallback）
+├── generate_cover.py             # 文章封面图生成（Pexels搜索+裁剪）
+├── image_search.py               # Pexels/Pixabay图片搜索下载
+├── wechat_publish.py             # 微信公众号发布器（含Markdown→HTML转码）
+├── publish_worker.py             # 发布 worker（消费 queue/）
+├── publish_queue.py              # 发布队列（文件锁）
 │
-├── tag_materials.py            # 增量素材打标（Phase 0，打标7维度）
-├── write_article.py            # 公众号文章写作（Phase 1）
-├── embed_images.py             # IMAGE占位符替换（Phase 2 fallback）
-├── generate_cover.py           # 文章封面图生成（Pexels搜索+裁剪）
-├── image_search.py             # Pexels/Pixabay图片搜索下载（Pexels主+Pixabay备选）
-├── lib/pexels_images.py        # 正文配图「Pexels-first」可复用模块（检索+下载+尺寸归一化）
-├── wechat_publish.py           # 微信公众号发布器（含Markdown→HTML转码）
+├── research_cards.py             # 飞书研究卡片生成+推送
+├── stats_daily.py                # 每日采集统计
+├── hot_recommend.py              # 公众号底部热门文章推荐
+├── fetch_wechat_stats.py         # 公众号数据分析（阅读量等）
+├── analyze_wechat_data.py        # 公众号数据深度分析
 │
-├── decompose_case_study.py     # 每日案例拆解管线
-├── synthesize_weekly.py        # 周报合成（替代weekly-synthesis skill）
-├── framework_article.py        # 框架/方法论文章（骨架版，未启用cron）
-├── polish_article.py           # 文章润色
+├── library_system_prompts.py     # 系统提示词库
+├── tag_schema.py                 # 打标维度schema
 │
-├── research_cards.py           # 飞书研究卡片生成+推送
-├── stats_daily.py              # 每日采集统计
-├── hot_recommend.py            # 公众号底部热门文章推荐
-├── fetch_wechat_stats.py       # 公众号数据分析（阅读量等）
-├── analyze_wechat_data.py      # 公众号数据深度分析
-│
-├── library_system_prompts.py   # 系统提示词库
-├── tag_schema.py               # 打标维度schema
-│
+├── sources.yaml                  # 采集源配置（rss/reddit/blogs/consulting/thinktank/podcast）
 ├── lib/
-│   ├── __init__.py             # 共享工具（路径、URL注册表）
-│   ├── env_loader.py           # .env自动加载
-│   ├── llm.py                  # LLM调用封装（OpenRouter）
-│   ├── materials.py            # 素材管理（读取/过滤/去重）
-│   └── models.py               # 模型配置（集中管理）
+│   ├── __init__.py               # 共享工具（路径、URL注册表、去重、quick-filter）
+│   ├── env_loader.py             # .env自动加载
+│   ├── llm.py                    # LLM调用封装（OpenRouter）
+│   ├── materials.py              # 素材管理（读取/过滤/去重）
+│   ├── models.py                 # 模型配置（集中管理）
+│   └── page_utils.py             # 页面正文/链接提取工具（extract_page_summary 等）
 │
-└── .env.example               # 环境变量模板
+└── .env.example                  # 环境变量模板
 ```
 
 ## 详细脚本说明
 
 ### 采集层 (Collection)
 
-| 脚本 | 功能 | 触发方式 |
-|------|------|---------|
-| `collect_rss.py` | RSS源采集：从配置的RSS feed抓取最新文章 | cron 05:00 Phase 1 |
-| `collect_blogs.py` | AI公司博客采集：Anthropic/OpenAI/DeepMind等官方博客 | cron 05:00 Phase 1 |
-| `collect_consulting.py` | 咨询报告采集：McKinsey/BCG/Deloitte等，仅周一运行 | cron 05:00 周一 Phase 1 |
-| `collect_podcasts.py` | 播客节目发现：仅周一 | cron 05:00 周一 Phase 1 |
-| `collect.py` | 统一CLI层，可替代上面所有采集脚本独立调用 | 手动 |
+采集统一由 `platform_cli.py run collect-daily` 调度，各来源 loader 在 `content_platform/ingest/` 下，配置在 `sources.yaml`：
 
-### 过滤层 (Filtering)
+| 来源 | 模块 | 说明 |
+|------|------|------|
+| RSS | `content_platform/ingest/rss.py` | 从配置的 RSS feed 抓取最新文章 |
+| Reddit | `content_platform/ingest/reddit.py` | 抓取配置子版块 top/hot 热门讨论，quick-filter 筛企业AI落地相关 |
+| 公司博客 | `content_platform/ingest/blogs.py` | Anthropic/OpenAI/Google/Microsoft 等官方博客 |
+| 咨询报告 | `content_platform/ingest/consulting.py` | McKinsey/BCG/Deloitte 等（Serper 搜索）+ 智库列表页 |
+| 案例/播客 | `content_platform/ingest/cases.py` | 案例拆解与播客素材 |
 
-| 脚本 | 功能 |
-|------|------|
-| `filter_items.py` | LLM驱动的素材过滤：调用DeepSeek API判断每条素材是否与企业AI落地相关，打上pass/skip标签 |
-| `poll_and_save.py` | 轮询过滤结果并保存到 reports/ 目录 |
+### 过滤/打标层 (Filtering & Tagging)
 
-### 标签层 (Tagging)
-
-| 脚本 | 功能 |
-|------|------|
-| `tag_materials.py` | 增量打标：对未标记的新素材，用LLM打7维度标签（形式、主题、视角、证据来源、证据深度、语气、实体） |
-| `tag_schema.py` | 7维度标签的Schema定义 |
+过滤与打标内嵌在 collect-daily 的 curate 阶段（`content_platform/runtime.py`）：
+- **LLM 打标**：对素材打 7 维度标签（形式、主题、视角、证据来源、证据深度、语气、实体），schema 见 `tag_schema.py`
+- **聚类去重**：按标签+内容 hash 聚类，跨天内容级去重
+- **LLM 打分**：`editorial_fit_score` 打分，高于阈值进入素材池
 
 ### 写作层 (Writing)
 
@@ -140,7 +144,7 @@ collector/
 | `lib/pexels_images.py` | 正文配图「Pexels-first」可复用模块：`resolve_image()` 按 已有图→Pexels→(仅显式允许时)生成式 解析并做尺寸/格式归一化 |
 | `generate_cover.py` | 封面图生成：搜索Pexels → 下载 → 裁剪为2.35:1（文章顶部）和1:1（列表缩略图） |
 | `polish_article.py` | 文章润色：LLM驱动的语言优化 |
-| `synthesize_weekly.py` | 周报合成：读取7天素材 → 主题聚类 → 写全文 → 配图 → 发布 |
+| `synthesize_weekly.py` | 周报合成：读取素材 → 主题聚类 → 写全文 → 配图 → 发布 |
 | `framework_article.py` | 框架/方法论文章（骨架版，待启用） |
 
 ### 发布层 (Publishing)
@@ -186,26 +190,21 @@ collector/
 
 ```
 run_all.sh
-├── Phase 1: 采集
-│   ├── collect_rss.py       ← RSS feed抓取
-│   └── collect_blogs.py     ← AI公司博客
-│   ├── collect_consulting.py  (仅周一)
-│   └── collect_podcasts.py    (仅周一)
-│
-├── Phase 2: LLM过滤
-│   └── filter_items.py <source>  ← DeepSeek API判断相关度
-│
-├── Phase 3: 保存
-│   └── poll_and_save.py <source> ← 保存到 reports/
-│
-├── Phase 4: 咨询报告策略 (仅周一)
-│   └── consulting-report-strategist agent
-│
-├── Phase 5: 研究卡片 → 飞书
-│   └── research_cards.py --max-cards 5
-│
-└── Phase 6: 每日统计
-    └── stats_daily.py --save
+└── platform_cli.py run collect-daily
+    ├── Phase 1: 采集（content_platform/ingest/）
+    │   ├── load_rss_materials       ← RSS feed抓取
+    │   ├── load_reddit_materials    ← Reddit热门讨论（sources.yaml → reddit）
+    │   ├── load_blog_materials      ← AI公司博客
+    │   ├── load_consulting_materials← 咨询报告 + 智库
+    │   └── load_case_materials      ← 案例/播客
+    │
+    ├── Phase 2: 规范化 + LLM打标（7维度）
+    ├── Phase 3: 聚类 + 内容级去重
+    ├── Phase 4: LLM打分（editorial_fit_score ≥ 0.65 进素材池）
+    ├── Phase 5: 构建素材池
+    │   ├── datasets/article_pool.json  ← 公众号文章候选
+    │   └── datasets/case_pool.json     ← 案例拆解候选
+    └── Phase 6: cleanup（清理30天前中间产物）
 ```
 
 ### 每日文章管线 (cron 06:00)
@@ -217,8 +216,8 @@ run_all.sh
 
 ```
 run_daily_article.sh
-├── Phase 0: 增量打标
-│   └── tag_materials.py --max-batches 10
+├── Phase 0: 读取素材池（打标/打分已在 collect-daily 完成）
+│   └── datasets/article_pool.json → 选材
 │
 ├── Phase 1: AI写作 + 入队（Stage A：内容生成）
 │   └── write_article.py --date today
@@ -273,14 +272,21 @@ decompose_case_study.py --external
 管线运行后会生成以下目录：
 
 ```
-reports/                    # 采集素材库
+reports/                    # URL注册表 + 历史素材库
 ├── _index/
 │   ├── all_urls.tsv       # 所有URL注册表（collected/used/passed/skipped）
-│   └── url_dates.tsv      # URL日期索引
-├── rss/                    # RSS素材HTML/JSON
-├── blogs/                  # AI公司博客
-├── consulting/             # 咨询报告
-└── thinktank/              # 智库报告
+│   └── content_hashes.tsv # 内容hash注册表（跨天转载去重）
+├── newsletters/            # RSS素材存档
+├── blog/                   # AI公司博客存档
+├── consulting-reports/     # 咨询报告存档
+└── reddit/                 # Reddit讨论存档
+
+platform/                   # 内容中台中间产物（collect-daily 产出）
+├── ingest/raw/YYYY-MM-DD/  # 原始采集素材
+├── normalize/YYYY-MM-DD/   # 规范化素材
+├── curate/YYYY-MM-DD/      # 聚类打分后素材
+├── datasets/YYYY-MM-DD/    # article_pool / case_pool
+└── jobs/YYYY-MM-DD/        # job 状态与日志
 
 wechat-articles/            # 公众号文章输出目录
 ├── (YYYY-MM-DD)-title/
@@ -322,16 +328,16 @@ python3 write_article.py --dry-run
 
 ```cron
 # 采集管线 — 每天05:00
-0 5 * * * /path/to/collector/run_all.sh
+0 5 * * * /path/to/content-hub/run_all.sh
 
 # 每日公众号文章 — 每天06:00
-0 6 * * * cd /path/to/collector && bash run_daily_article.sh
+0 6 * * * cd /path/to/content-hub && bash run_daily_article.sh
 
 # 独立发布阶段 — 每5分钟消费队列，空队列静默
-*/5 * * * * cd /path/to/collector && bash run_publish_worker.sh
+*/5 * * * * cd /path/to/content-hub && bash run_publish_worker.sh
 
 # 每日案例拆解 — 每天10:00，只运行 case-daily
-0 10 * * * cd /path/to/collector && bash run_daily_case.sh
+0 10 * * * cd /path/to/content-hub && bash run_daily_case.sh
 ```
 
 ## 注意事项
@@ -348,9 +354,11 @@ python3 write_article.py --dry-run
 所有采集源的配置文件，包含：
 - **reader**: 内容获取方式（direct HTTP / Jina Reader API）
 - **rss**: 30+ RSS源（One Useful Thing、Import AI、TLDR AI、TechCrunch等科技媒体）
+- **reddit**: Reddit热门讨论子版块（artificial、AI_Agents、MachineLearning等，走公开JSON API，配REDDIT_CLIENT_ID/SECRET时自动用OAuth）
 - **blogs**: AI公司博客（OpenAI、Anthropic、Google、Microsoft等20+）
 - **consulting**: 咨询报告搜索词（McKinsey、BCG等10家）
 - **thinktank**: 智库页面（MIT Sloan、HBR、Wharton、RAND）
-- **filtering**: LLM过滤规则配置（6个相关度维度及权重）
+- **podcast**: 播客频道/Feed（案例拆解用）
+- **filtering**: 相关度过滤规则配置（quick-filter 关键词见 `lib/__init__.py` TOPIC_KW_MAP）
 
 > ⚠️ `sources.yaml` 中的 API key 已脱敏为占位符，使用前需替换为真实值。
