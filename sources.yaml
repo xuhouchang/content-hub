@@ -311,6 +311,57 @@ blogs:
 
   # Microsoft .NET Agent Blog removed per request
 
+# ── Reddit Hot Discussions ──
+# 每天采集：抓取各子版块热度最高的讨论帖，quick-filter 筛出 AI 企业落地相关话题，
+# 再走 LLM 过滤 → 聚类 → 写作 → 配图 → 发布的现有链路。
+# 数据源为 Reddit 公开 JSON API（top/hot/rising）；配置了 REDDIT_CLIENT_ID /
+# REDDIT_CLIENT_SECRET 时自动升级为 app-only OAuth（限额更高更稳）。
+# 帖子的 canonical URL 是讨论页 permalink，外链帖保留 external_url 供正文抓取。
+reddit:
+  enabled: true
+  sort: "top"           # top（最高赞，默认）/ hot / rising
+  time_filter: "day"    # hour / day / week / month / year
+  max_items_per_sub: 15 # 每个子版块最多取多少帖
+  min_score: 0          # 低于该分的帖子跳过
+  # Tier 1：高优先级（企业AI落地核心相关）
+  subreddits:
+    - name: "sysadmin"
+      priority: high
+      topics: ["enterprise-ai", "workflow", "operations"]
+
+    - name: "smallbusiness"
+      priority: high
+      topics: ["enterprise-ai", "small-business", "workflow"]
+
+    - name: "ExperiencedDevs"
+      priority: high
+      topics: ["engineering", "workflow", "productivity"]
+
+    - name: "consulting"
+      priority: high
+      topics: ["enterprise-ai", "consulting", "management"]
+
+    - name: "automation"
+      priority: high
+      topics: ["automation", "workflow", "enterprise-ai"]
+
+    # Tier 2：中优先级
+    - name: "Entrepreneur"
+      priority: medium
+      topics: ["startups", "enterprise-ai", "product"]
+
+    - name: "LocalLLaMA"
+      priority: medium
+      topics: ["open-source", "engineering", "llm"]
+
+    - name: "SaaS"
+      priority: medium
+      topics: ["saas", "enterprise-ai", "b2b"]
+
+    - name: "ArtificialInteligence"
+      priority: medium
+      topics: ["trends", "enterprise-ai", "research"]
+
 # ── Consulting Reports ──
 # 每天采集（原先仅有周一，改为每天后可以提高企业端内容供给）
 # 搜索查询通过 Serper API 执行
