@@ -157,6 +157,72 @@ def test_selection_records_referenced_history(monkeypatch):
     assert rejection["history_ref"] == {"match": "title", "title": "Fresh topic"}
 
 
+def test_executive_rerank_records_score_and_reason(monkeypatch):
+    weak = _material("Weak evidence", "c1", editorial=0.9, summary="one 10% datapoint")
+    strong = _material(
+        "Strong evidence",
+        "c2",
+        editorial=0.7,
+        summary="38% and 21% and 4x and $12 and 90%",
+        content="deployed and measured after go live",
+    )
+    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7, workspace_dir=None: [])
+    monkeypatch.setattr(
+        tp, "_load_recent_source_urls", lambda topics, days=7, workspace_dir=None: set()
+    )
+    monkeypatch.setattr(
+        tp,
+        "_llm_rank_executive_value",
+        lambda candidates, model="m": {
+            "https://example.com/c1": {"score": 9.5, "reason": "可迁移的落地机制"}
+        },
+    )
+
+    result = tp.select_candidates([weak, strong], n=1)
+
+    # The lower-evidence candidate wins only because of the executive score.
+    assert result["selected"][0]["title"] == "Weak evidence"
+    decision = next(d for d in result["decisions"] if d["decision"] == "selected")
+    assert decision["executive"]["score"] == 9.5
+    assert decision["executive"]["reason"] == "可迁移的落地机制"
+    assert decision["executive"]["applied"] is True
+    # The override is not silent: evidence rank 1 was chosen over rank 0.
+    assert decision["evidence_rank"] == 1
+    assert result["executive_ranking"] == [
+        {"url": "https://example.com/c1", "score": 9.5, "reason": "可迁移的落地机制"}
+    ]
+
+
+def test_executive_rerank_without_reason_cannot_override_evidence(monkeypatch):
+    weak = _material("Weak evidence", "c1", editorial=0.9, summary="one 10% datapoint")
+    strong = _material(
+        "Strong evidence",
+        "c2",
+        editorial=0.7,
+        summary="38% and 21% and 4x and $12 and 90%",
+        content="deployed and measured after go live",
+    )
+    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7, workspace_dir=None: [])
+    monkeypatch.setattr(
+        tp, "_load_recent_source_urls", lambda topics, days=7, workspace_dir=None: set()
+    )
+    monkeypatch.setattr(
+        tp,
+        "_llm_rank_executive_value",
+        lambda candidates, model="m": {
+            "https://example.com/c1": {"score": 9.9, "reason": ""}
+        },
+    )
+
+    result = tp.select_candidates([weak, strong], n=1)
+
+    # An unexplained score is recorded but must not silently reorder candidates.
+    assert result["selected"][0]["title"] == "Strong evidence"
+    decision = next(d for d in result["decisions"] if d["decision"] == "selected")
+    assert decision["executive"]["applied"] is False
+    assert decision["evidence_rank"] == 0
+
+
 def test_pipeline_persists_decisions_and_rejection_counts(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7, workspace_dir=None: [])
     monkeypatch.setattr(
@@ -178,6 +244,7 @@ def test_pipeline_persists_decisions_and_rejection_counts(tmp_path: Path, monkey
     persisted = json.loads(Path(result["selection_file"]).read_text(encoding="utf-8"))
     assert persisted["rejection_counts"] == result["rejection_counts"]
     assert "referenced_history" in persisted
+    assert "executive_ranking" in persisted
     assert persisted["model_available"] is True
 
 

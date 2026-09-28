@@ -130,6 +130,10 @@ def _evidence_rank_key(candidate: dict) -> tuple:
     )
 
 
+def _candidate_url(material: dict) -> str:
+    return (material.get("canonical_url", "") or material.get("url", "")).rstrip("/")
+
+
 def select_candidates(
     candidates: list[dict],
     n: int = 2,
@@ -158,6 +162,7 @@ def select_candidates(
             "model_available": True,
             "scanned": 0,
             "referenced_history": [],
+            "executive_ranking": [],
         }
 
     recent_topics = _load_recent_topics(days=topic_diversity_days, workspace_dir=workspace_dir)
@@ -168,6 +173,7 @@ def select_candidates(
     referenced_history = _referenced_history(recent_topics)
 
     sorted_candidates = sorted(candidates, key=_evidence_rank_key, reverse=True)
+    evidence_rank = {id(m): index for index, m in enumerate(sorted_candidates)}
 
     # ── 段位重排：对 top-K 候选做决策者洞察排序 ──
     # 素材分高（执行细节丰富）≠ 段位高（面向老板的普适洞察）。
@@ -186,11 +192,18 @@ def select_candidates(
         if len(top_candidates) >= top_k:
             break
 
+    executive_ranking: dict[str, dict] = {}
     if len(top_candidates) > n:
-        exec_scores = _llm_rank_executive_value(top_candidates, model=model)
-        if exec_scores:
+        executive_ranking = _llm_rank_executive_value(top_candidates, model=model)
+        # A model score may only re-order candidates when it carries a recorded
+        # rationale; an unexplained score must never silently override the
+        # evidence ranking. The rationale is persisted with each decision below.
+        applicable = {
+            url: info for url, info in executive_ranking.items() if info.get("reason")
+        }
+        if applicable:
             top_candidates.sort(
-                key=lambda m: exec_scores.get(m.get("canonical_url", "") or m.get("url", ""), -1.0),
+                key=lambda m: applicable.get(_candidate_url(m), {}).get("score", -1.0),
                 reverse=True,
             )
             print(f"  🎯 Executive-value ranking applied to {len(top_candidates)} candidates")
@@ -222,8 +235,21 @@ def select_candidates(
 
         title = m.get("title", "")
         digest = m.get("summary", "")
-        candidate_url = (m.get("canonical_url", "") or m.get("url", "")).rstrip("/")
-        record = {"url": candidate_url, "title": title, "cluster_id": cluster_id}
+        candidate_url = _candidate_url(m)
+        executive = executive_ranking.get(candidate_url) or {"score": None, "reason": ""}
+        record = {
+            "url": candidate_url,
+            "title": title,
+            "cluster_id": cluster_id,
+            "evidence_rank": evidence_rank.get(id(m)),
+            "executive": {
+                "score": executive.get("score"),
+                "reason": executive.get("reason", ""),
+                # True only when the score carried a rationale and therefore
+                # participated in the re-rank that produced this ordering.
+                "applied": bool(executive.get("reason")),
+            },
+        }
 
         # ── Layer 1: URL-level dedup (deterministic) ──
         if recent_source_url_set and candidate_url.lower() in recent_source_url_set:
@@ -300,6 +326,10 @@ def select_candidates(
         "model_available": model_available,
         "scanned": len(candidates_to_check),
         "referenced_history": referenced_history,
+        "executive_ranking": [
+            {"url": url, "score": info.get("score"), "reason": info.get("reason", "")}
+            for url, info in executive_ranking.items()
+        ],
     }
 
 
@@ -320,12 +350,14 @@ def pick_top_n_clusters(
     )["selected"]
 
 
-def _llm_rank_executive_value(candidates: list[dict], model: str = "deepseek-flash") -> dict[str, float]:
+def _llm_rank_executive_value(
+    candidates: list[dict], model: str = "deepseek-flash"
+) -> dict[str, dict]:
     """Ask the LLM to score the executive-insight (段位) value of candidates.
 
-    Returns {url: executive_score(0-10)}. A high score means the candidate can
-    support a high-caliber article for enterprise-AI decision makers — one
-    that extracts a transferable mechanism/judgment (not just case storytelling).
+    Returns ``{url: {"score": executive_score(0-10), "reason": "一句话理由"}}``.
+    The rationale travels with the score so the re-rank is auditable and an
+    unexplained score can never silently override the evidence ranking.
 
     Used to re-rank the top candidates so the strongest editorial_fit material
     doesn't automatically win: 段位 beats 细节.
@@ -392,15 +424,19 @@ def _llm_rank_executive_value(candidates: list[dict], model: str = "deepseek-fla
     except json.JSONDecodeError:
         return {}
 
-    scores = {}
+    ranking: dict[str, dict] = {}
     for r in results:
         url = r.get("url", "")
         if url:
             try:
-                scores[url] = float(r.get("executive_score", 0.0))
+                score = float(r.get("executive_score", 0.0))
             except (TypeError, ValueError):
-                scores[url] = 0.0
-    return scores
+                score = 0.0
+            ranking[url] = {
+                "score": score,
+                "reason": str(r.get("reason", "") or "").strip(),
+            }
+    return ranking
 
 
 # ── Legacy compatibility wrapper ──

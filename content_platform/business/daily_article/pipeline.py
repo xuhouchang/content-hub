@@ -56,6 +56,7 @@ def run_daily_article_pipeline(
             "decisions": [],
             "rejection_counts": rejection_counts,
             "referenced_history": [],
+            "executive_ranking": [],
             "model_available": True,
             "status": "failed",
         })
@@ -66,6 +67,7 @@ def run_daily_article_pipeline(
             "rejection_counts": rejection_counts,
             "decisions": [],
             "referenced_history": [],
+            "executive_ranking": [],
             "selections": [],
             "materials_files": [],
             "selection_file": str(selection_file),
@@ -78,6 +80,7 @@ def run_daily_article_pipeline(
     selections = selection["selected"]
     decisions = selection["decisions"]
     referenced_history = selection["referenced_history"]
+    executive_ranking = selection.get("executive_ranking", [])
     rejection_counts = _count_rejections(pool_rejected, decisions)
 
     if not selections:
@@ -87,6 +90,7 @@ def run_daily_article_pipeline(
             "decisions": decisions,
             "rejection_counts": rejection_counts,
             "referenced_history": referenced_history,
+            "executive_ranking": executive_ranking,
             "model_available": selection["model_available"],
             "status": "failed",
         })
@@ -97,6 +101,7 @@ def run_daily_article_pipeline(
             "rejection_counts": rejection_counts,
             "decisions": decisions,
             "referenced_history": referenced_history,
+            "executive_ranking": executive_ranking,
             "selections": [],
             "materials_files": [],
             "selection_file": str(selection_file),
@@ -112,6 +117,7 @@ def run_daily_article_pipeline(
         "decisions": decisions,
         "rejection_counts": rejection_counts,
         "referenced_history": referenced_history,
+        "executive_ranking": executive_ranking,
         "model_available": selection["model_available"],
         "status": "success",
         "article_count": len(selections),
@@ -134,6 +140,7 @@ def run_daily_article_pipeline(
         "rejection_counts": rejection_counts,
         "decisions": decisions,
         "referenced_history": referenced_history,
+        "executive_ranking": executive_ranking,
         "selections": selections,
         "materials_files": materials_files,
         "selection_file": str(selection_file),

@@ -80,3 +80,26 @@ Reviewer 自行重跑证据：`pytest -q tests` = **131 passed**；`pytest -q te
 ## Round 1 状态
 
 M0 + M1 **通过独立复验，无阻断项**。仍需人工处理：VerifyKit acceptance/ground truth 的 `approved:true` 由人工决定；`assets/placeholder.jpg` 删除待人工确认；M2–M5 未实施（第 2、3 轮）。
+
+## Round 2 — Executor（M2 + M3 + M4）
+
+提交：`c53417c`（Step 0，按人工决定保留并提交 `assets/placeholder.jpg` 删除）、`d70a8e1`（M2）、`2fd6e65`（M3）、`b5e5fc5`（M4）。
+
+- M2：每条候选记录 `candidate_evidence`（原始来源、可核实事实、落地细节、正文完整度、评分置信度）；无可核实证据者按 `no_checkable_evidence` 等理由淘汰；记录决策理由、`referenced_history`/`history_ref`、`model_available`；有界补选；运行层按"合格终稿数"2/1/0 输出 success/partial/failed 与拒绝原因计数。
+- M3：唯一 `make_run_id`；每次运行写 `platform/jobs/<date>/<job>/runs/<run_id>/job.json`，`job.json` 保留为最新兼容视图；日期级 `index.json`；三个编排入口在 `finally` 记录终态/原因/计数/健康；`platform_cli` 退出码与记录状态一致；告警按 run ID 去重、恢复可见。
+- M4：案例记录写入可比较 `cluster_ids`；案例只与案例账本比较、文章只与文章账本比较；`workspace_dir` 显式贯穿账本/pool/planner；旧混合账本只读保留。
+- 证据：`pytest -q tests` = **164 passed**（136→148→157→164）；`queue/pending.jsonl` md5 `0900ce0ab0fed4ee2e003a797e760a1a` 且 11 条，前后未变；工作区干净。VerifyKit `check` PASS；`run` Run #7 `run_20260928095045_782f9d9a` FAIL（仅因 ground truth 未批准），3/3 步 EXECUTED/REAL，mock 0，unexpected fallback 0。
+
+## Round 2 — Reviewer 第 1 次验收（全新 Reviewer）
+
+**结论：NOT PASSED，5 个阻断问题。** 测试 164 passed 复核通过；新测试非空（在旧基线会失败），但未覆盖下列对抗场景。VerifyKit Run #8 `run_20260928095537_c655330f` FAIL（仅因未人工批准），3/3 步 EXECUTED/REAL，mock 0，unexpected fallback 0。真实数据与工作区保持干净。
+
+**BLOCKING**
+
+1. **M2 决策不可解释**：`topic_planner.py:189` 的"主编模型重排"会改变选择结果，但 `225-289` 处的决策记录既没保存该分数也没保存理由。Reviewer 复现出"仅因这个未记录的分数而选中了证据更弱的候选"。
+2. **M3 每篇日志仍会被覆盖**：`runtime.py:601/730` 仍把每篇 writer 日志写到共享的 job 目录，而不是 `runs/<run_id>/`。Reviewer 复现：同日第二次运行覆盖了第一次的 `writer_1_stdout.log`。
+3. **M3 告警去重不完整**：`alerts.py:59` 只把"紧邻的上一个 `last_run_id`"当作重复。Reviewer 复现：在 `run-2` 之后重放 `run-1`，连续失败计数从 2 涨到 3。
+4. **M4 跨类型去重未用规范化 URL**：`recent_topics.py:121` 只用"转小写 + 去尾部斜杠"，没有用仓库既有的 URL 规范化器。Reviewer 复现：`?utm_source=` 变体与干净 URL 被同时接受。
+5. **M4 内容哈希去重未在选择边界生效**：选择阶段只查 source URL（`case pipeline:19`），content hash 仅在 curate 阶段使用（`runtime.py:337`）。Reviewer 复现：一个案例成功后，仍选中了 URL 不同但 `content_hash` 相同的文章。
+
+**说明**：Step 0 判定 MET（缺图时 `image_search.py` 明确报错退出，非静默）；新增 3 处 `BLE001` 捕获会真实记录终态，不是静默吞错。
