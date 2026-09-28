@@ -55,3 +55,28 @@ Reviewer 自行重跑证据：`pytest -q tests` = **131 passed**；`pytest -q te
 **说明（非缺陷）**：Reviewer 指出计划文档未包含"37 / 90 passed"这两条聚焦命令，故无法从**文档**复现。这两条命令来自 Planner 的计划（§6），等价的完整证据是全量 `pytest -q tests` = 131 passed。两条命令已记录于本文件 Round 1 Executor 小节。
 
 **方向确认**：Reviewer 指出 `tests/conftest.py` 的隔离、M1 提交门、稳定 ID 与队列去重均正确；VerifyKit 的 FAIL 属于"未人工批准"，不是代码缺陷。
+
+## Round 1 — 修复轮（Executor）
+
+提交 `74ca2f8`：`fix(M0): funnel date discovery and failure classification`（改 4 个文件）：
+`content_platform/audit/funnel.py`、`tests/platform/test_funnel.py`、`docs/2026-09-28-baseline-funnel.md`（重新生成）、`WORKFLOW-ITERATIONS.md`（纳入版本管理）。
+
+- 新增 `_record_date()`（读 `enqueued_at`/`finished_at`/`date`，校验 `YYYY-MM-DD`）；`_discover_dates` 现扫描 `platform/jobs`、`platform/datasets`、**四个队列文件**与文章/案例/旧版主题账本。仅存在于队列的日期以 `unknown` 上游环节输出。
+- 新增 `_queue_state()`（优先级 failed > processing > pending > done），作为每运行 `queue_state` 字段；`wechat_failure` 现在**必须**有 `failed.jsonl` 证据；pending/processing 归为"未发布"。注释与行为一致。
+- 更新原先断言错误行为的测试；新增 pending-only / processing-only / done（含 `media_id`）/ failed（含 `attempts`/`error`）覆盖；新增队列独有日期回归测试。
+- 证据：`pytest -q tests` = **136 passed**；`ruff check content_platform/audit/funnel.py tests/platform/test_funnel.py` = clean；`queue/pending.jsonl` 前后 md5 均 `0900ce0ab0fed4ee2e003a797e760a1a`（仍 11 条）；`git status --short` 仅 ` D assets/placeholder.jpg`。
+
+## Round 1 — Reviewer 第 2 轮（全新 Reviewer，修复复验）
+
+**结论：PASS，零阻断问题。**
+
+- 三项 Round-1 阻断判定均为 **FIXED**（附 file:line）。新漏斗测试非空断言（在旧实现上会失败）。
+- 未发现 M2–M5 越界或密钥暴露；修复提交只动了声明的 4 个文件。
+- 测试：`pytest -q tests` = 136 passed；`tests/platform/test_funnel.py` = 10 passed；ruff clean；重新生成的漏斗输出与已提交表格一致。
+- 真实数据：全套测试前后 `queue/pending.jsonl` md5 均为 `0900ce0ab0fed4ee2e003a797e760a1a`（11 条），材料缓存 md5 未变，无 `platform/state/` 新文件。
+- VerifyKit：`check` 静态策略 PASS；Golden Path Run #5 `run_20260928092440_ba4d7cef` = FAIL，**唯一原因**为 ground truth 仍 `approved=false`；3 个必需步全部 executed、0 skipped、全 REAL、mock 0、unexpected fallback 0。
+- optional（未实施）：`_record_date()` 目前只校验年份与连字符位置，`2026-AB-CD` 这类畸形值可能被当作日期；当前真实数据不受影响，属防御性改进。
+
+## Round 1 状态
+
+M0 + M1 **通过独立复验，无阻断项**。仍需人工处理：VerifyKit acceptance/ground truth 的 `approved:true` 由人工决定；`assets/placeholder.jpg` 删除待人工确认；M2–M5 未实施（第 2、3 轮）。
