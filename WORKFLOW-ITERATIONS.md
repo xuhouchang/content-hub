@@ -131,3 +131,46 @@ M0 + M1 **通过独立复验，无阻断项**。仍需人工处理：VerifyKit a
 ## Round 2 状态
 
 **M2 + M3 + M4 通过最新一次独立复验，无阻断项。** 待办：VerifyKit acceptance/ground truth 的 `approved:true` 由人工决定；外部告警渠道待人工提供接收人与凭据；M5 未实施（第 3 轮）。
+
+## Round 3 — Executor（M5，第 1 阶段：离线）
+
+基线 `master@b0853d88a02d29feb8d20ad4e2736fe373b16679`。本阶段只实现 M5 代码、测试、文章与证据文档并跑完全部**离线**检查，**不发起任何真实外部调用**，也**不提交**。真实调用在第 2 阶段、获得用户明确批准后执行。
+
+新增/修改：
+
+- 修改 `.verifykit/bridge/pipeline.mjs`：新增两个默认关闭（`M5_LIVE_APPROVED=1` 才启用）的 M5 步骤 `wechat.deepseek_live`、`wechat.draft_live`，均为 `required:false`；失败在步骤内 `kit.degrade(reason)`；仅当服务商确实返回请求 ID（响应体 `id` 或响应头 `x-request-id`）才 `kit.external({source:"external"})`，不使用会合成 ID 的 `recordHttpEvidence()`。Node 桥接对 DeepSeek 设 35 秒进程总时限、对微信设 120 秒。
+- 新增 `.verifykit/bridge/m5_acceptance.py`：一次性真实探针（DeepSeek 一次 `max_tokens=128` 请求、30s 超时、64 KiB 上限、不重试；微信一次草稿，隔离队列 `.verifykit/data/m5/<run-id>/`）。独占创建（`O_CREAT|O_EXCL`）的一次性标记保证至多一次；输出仅白名单字段，密钥/提示/完整回复/原始错误体不落盘。不改 `lib/llm.py`，不改生产 worker 队列行为。
+- 新增 `tests/test_m5_acceptance.py`（19 条离线边界测试）。
+- 新增 `docs/acceptance/m5-test-article.md`（标题 `[链路自测] 公众号草稿创建验证`，无外链、无图片）。
+- 新增 `docs/2026-09-28-m5-evidence.md`、`docs/2026-09-28-m5-known-gaps.md`、`docs/2026-09-28-m5-launchd.md`。
+
+离线证据（第 1 阶段）：
+
+- `pytest -q tests/test_m5_acceptance.py` = **19 passed**；`pytest -q tests` = **190 passed**（171 → 190）。
+- `verifykit check` exit 0（47 files，3 rules）。
+- `verifykit run wechat-article-pipeline`（无 gate）exit 1 = FAIL，**唯一原因**为 ground truth 未人工批准；Run ID `run_20260928131838_d1c8a0d2`（Run #12），3 个 M0 步 EXECUTED/REAL，2 个 M5 步 SKIPPED（`M5_LIVE_APPROVED!=1`），mock 0，unexpected fallback 0，external evidence 为空。
+- 新增文件 ruff clean；`git diff --check` clean；`queue/pending.jsonl` md5 `0900ce0ab0fed4ee2e003a797e760a1a` 且 11 条，前后一致。
+
+排程现状（只读）：`launchctl` 仅有自检 agent `com.contenthub.schedulertest`；无 content-hub 生产定时任务；`crontab` 只有无关的 youtube-clipper 条目。本轮未加载/启用/修改任何定时任务。
+
+## Round 3 状态
+
+**M5 第 1 阶段（离线）完成，等待用户批准后执行第 2 阶段（各一次真实 DeepSeek 请求与微信草稿创建）。** 未提交；`git status` 仅 M5 相关新增/修改。真实调用唯一命令：`M5_LIVE_APPROVED=1 verifykit run wechat-article-pipeline`。
+
+## Round 3 — Executor（M5，第 2 阶段：一次真实调用）
+
+用户批准范围：**一次**真实 DeepSeek 请求 + **一次**真实微信草稿创建。唯一命令 `M5_LIVE_APPROVED=1 verifykit run wechat-article-pipeline` **只执行一次**，未重试、未重跑队列。
+
+结果：VerifyKit live Run ID `run_20260928132310_ab6f9fd6`（Run #13）= **FAIL**。mock 1，unexpected fallback 1，errors 0，external evidence 1。
+
+- DeepSeek：`wechat.deepseek_live` EXECUTED/REAL，无降级。真实请求成功（HTTP 200，内容非空）；拿到服务商签发的响应体 id `00315f61-ba01-498c-b26b-a157032d7659`，通过 `kit.external({provider:"deepseek",type:"chat_completion_request",source:"external"})` 记录；未使用 `recordHttpEvidence()`，未合成 ID。响应侧模型 ID、认证分类、脚本级耗时与实际 usage 数值未单独落盘（VerifyKit level-1 仅存 schema/哈希），列为 Known Gap，不推算费用。
+- 微信：`wechat.draft_live` EXECUTED 但 mode=MOCK、fallback=unexpected（`m5.wechat.publish_failed`）。真实 API 返回 `40164 invalid ip 117.185.153.57 ... not in whitelist`（token 成功，`draft/add` 出口 IP 未白名单）。**未创建草稿**：隔离 `done.jsonl` 不存在、无 `media_id`；隔离 `pending.jsonl` 1 条 `attempts:1` 并已排下次重试，但**未再运行**。失败 rid `6aba6a3f-09f32081-0d8bcf70` 仅作为失败凭据记录，未通过 `kit.external`。
+- 一次性：`.verifykit/data/m5/run_20260928132310_ab6f9fd6/{deepseek/request.attempted,wechat/draft.attempted}` 均存在。
+- 队列完整性：live run 前后 `queue/pending.jsonl` md5 `0900ce0ab0fed4ee2e003a797e760a1a`、11 条不变；真实队列从未交给 worker。
+- 离线复验（live run 后）：`pytest -q tests` = **190 passed**（exit 0）；`verifykit check` exit 0（47 files，3 rules）；`git diff --check` exit 0。
+
+剩余 Known Gaps（详见 `docs/2026-09-28-m5-known-gaps.md`）：微信草稿未成功（IP 白名单，需新一次批准）；永久封面、生产图片/子进程路径、真实 queue 端到端、连续真实排程、外部告警渠道均未验证；DeepSeek 细节数值未落盘；acceptance/ground truth 仍 `approved:false`（刻意）。
+
+## Round 3 状态（最终）
+
+**M5 代码、测试、文章与证据文档完成；一次真实 DeepSeek 请求成功并留有 provider-issued 请求 ID；一次真实微信草稿因 IP 白名单失败并如实记录，草稿未创建。M5 不宣称全部通过。** 单次提交包含 M5 单元（代码 + 测试 + 文章 + 证据/Known Gap 文档）；`.verifykit/data/` 工件按 gitignore 不提交。下一步需新一次批准（新 run id）并解决微信出口 IP 白名单，才可再次尝试草稿。

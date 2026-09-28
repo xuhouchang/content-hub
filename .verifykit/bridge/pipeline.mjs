@@ -6,10 +6,12 @@
  * `.verifykit/bridge/local_pipeline.py` against an isolated temporary
  * workspace, and records each executed step with `kit.step()`.
  *
- * M0 scope: offline, deterministic local steps only. No network call is made
- * and no local step is ever reported as third-party evidence. Real provider
- * evidence (DeepSeek / WeChat) requires an actual provider-issued request id and
- * is added in M5.
+ * M0 steps are offline and deterministic. M5 adds two live probes that are
+ * DEFAULT OFF and only run when M5_LIVE_APPROVED=1: one capped DeepSeek request
+ * and one WeChat draft creation against an isolated queue. Without that gate,
+ * pytest, `verifykit check` and `verifykit run` never touch the network. A local
+ * step is never reported as third-party evidence; a provider-issued request id
+ * is recorded via kit.external() only when the provider actually returned one.
  */
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -20,8 +22,13 @@ import { dirname, join, resolve } from "node:path";
 const BRIDGE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(BRIDGE_DIR, "..", "..");
 const SCRIPT = join(BRIDGE_DIR, "local_pipeline.py");
+const M5_SCRIPT = join(BRIDGE_DIR, "m5_acceptance.py");
 const PYTHON = process.env.VERIFYKIT_PYTHON || join(REPO_ROOT, ".venv", "bin", "python");
 const DATE = process.env.VERIFYKIT_DATE || "2026-09-28";
+
+// Default OFF. Only an explicit M5_LIVE_APPROVED=1 enables any outbound call.
+const M5_LIVE_APPROVED = process.env.M5_LIVE_APPROVED === "1";
+const M5_TIMEOUT_MS = { deepseek: 35000, wechat: 120000 };
 
 function runPythonStep(step, workspace) {
   return new Promise((resolvePromise, rejectPromise) => {
@@ -47,6 +54,52 @@ function runPythonStep(step, workspace) {
         resolvePromise(JSON.parse(lastLine));
       } catch (error) {
         rejectPromise(new Error(`${step} returned non-JSON output: ${stdout.slice(-400)}`));
+      }
+    });
+  });
+}
+
+function runM5Step(step, runId) {
+  const timeoutMs = M5_TIMEOUT_MS[step] ?? 35000;
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(
+      PYTHON,
+      [M5_SCRIPT, "--step", step, "--repo-root", REPO_ROOT, "--run-id", runId],
+      { cwd: REPO_ROOT },
+    );
+    let stdout = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      rejectPromise(new Error(`m5 ${step} exceeded ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    // stderr is drained but intentionally not surfaced: it may carry a traceback
+    // and the detail is already classified inside the JSON result.
+    child.stderr.on("data", () => {});
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      rejectPromise(error);
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code !== 0) {
+        rejectPromise(new Error(`m5 ${step} exited ${code}`));
+        return;
+      }
+      const lastLine = stdout.trim().split("\n").filter(Boolean).pop() || "";
+      try {
+        resolvePromise(JSON.parse(lastLine));
+      } catch (error) {
+        rejectPromise(new Error(`m5 ${step} returned non-JSON output: ${error.message}`));
       }
     });
   });
@@ -93,6 +146,58 @@ export async function runPipeline(ctx) {
         input: { articles: (selection?.ranked ?? []).length },
       },
       async () => runPythonStep("enqueue", workspace),
+    );
+
+    // ── M5 live probes (default OFF) ──
+    // These are not required steps: a skipped probe cannot fail the Golden Path.
+    // When enabled and a probe fails, kit.degrade() records an explicit,
+    // unexpected fallback (mode=mock) instead of masking the failure.
+    await kit.step(
+      "wechat.deepseek_live",
+      {
+        required: false,
+        enabled: M5_LIVE_APPROVED,
+        skipReason: "M5_LIVE_APPROVED!=1",
+        input: { date: DATE, max_tokens: 128, attempts: 1 },
+      },
+      async () => {
+        const result = await runM5Step("deepseek", kit.runId);
+        if (result && result.provider_request_id) {
+          // Only a genuinely provider-issued id is recorded. No synthesized id.
+          kit.external({
+            provider: "deepseek",
+            type: "chat_completion_request",
+            externalId: String(result.provider_request_id),
+            source: "external",
+            metadata: {
+              model: result.response_model_id || result.request_model_id || null,
+              http_status: result.http_status ?? null,
+              content_non_empty: result.content_non_empty === true,
+            },
+          });
+        }
+        if (!result || result.ok !== true) {
+          kit.degrade(`m5.deepseek.${(result && result.error_class) || "unknown"}`);
+        }
+        return result;
+      },
+    );
+
+    await kit.step(
+      "wechat.draft_live",
+      {
+        required: false,
+        enabled: M5_LIVE_APPROVED,
+        skipReason: "M5_LIVE_APPROVED!=1",
+        input: { article: "docs/acceptance/m5-test-article.md", publish: false },
+      },
+      async () => {
+        const result = await runM5Step("wechat", kit.runId);
+        if (!result || result.ok !== true) {
+          kit.degrade(`m5.wechat.${(result && result.error_class) || "unknown"}`);
+        }
+        return result;
+      },
     );
   } finally {
     try {
