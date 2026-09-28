@@ -23,6 +23,7 @@ from lib import (
     is_duplicate,
     append_to_url_registry,
 )
+from content_platform.recent_topics import recent_source_urls, recent_topics
 
 # ── Paths ──
 WORKSPACE_DIR = Path(__file__).resolve().parent.parent  # lib/ -> workspace/
@@ -290,7 +291,7 @@ def score_material(m: dict) -> int:
 
 # ── Recent article tracking (diversity boost) ──
 # Path to recent article log (written by write_article.py on each run)
-RECENT_ARTICLES_FILE = WORKSPACE_DIR / "wechat-articles" / "_recent_topics.json"
+RECENT_ARTICLES_FILE = WORKSPACE_DIR / "wechat-articles" / "_article_topics.json"
 
 # Keywords that have been heavily used in recent articles —
 # materials whose titles/content overlap these will be penalized in scoring
@@ -309,18 +310,12 @@ _RECENT_THEMES = [
 def load_recent_themes() -> set:
     """Load recently used topic keywords from article log."""
     themes = set()
-    if RECENT_ARTICLES_FILE.exists():
-        try:
-            data = json.loads(RECENT_ARTICLES_FILE.read_text(encoding="utf-8", errors="replace"))
-            items = data if isinstance(data, list) else data.get("articles", [])
-            for item in items[-10:]:  # last 10 articles
-                title = (item.get("title", "") or "").lower()
-                digest = (item.get("digest", "") or "").lower()
-                for kw in _RECENT_THEMES:
-                    if kw in title or kw in digest:
-                        themes.add(kw)
-        except Exception:
-            pass
+    for item in recent_topics(WORKSPACE_DIR, "article", days=30)[-10:]:
+        title = (item.get("title", "") or "").lower()
+        digest = (item.get("digest", "") or "").lower()
+        for kw in _RECENT_THEMES:
+            if kw in title or kw in digest:
+                themes.add(kw)
     return themes
 
 
@@ -707,24 +702,12 @@ def sample_materials(materials: list[dict], max_count: int = 5, skip_used_filter
             return []
 
     # ── Exclude recently used URLs (past 3 days) ──
-    recent_topics_file = WORKSPACE_DIR / "wechat-articles" / "_recent_topics.json"
-    recently_used_urls = set()
-    if recent_topics_file.exists():
-        try:
-            entries = json.loads(recent_topics_file.read_text(encoding="utf-8"))
-            cutoff = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
-            for entry in entries:
-                if entry.get("date", "") >= cutoff:
-                    for url in entry.get("source_urls", []):
-                        if url:
-                            recently_used_urls.add(url.rstrip("/"))
-        except Exception:
-            pass
+    recently_used_urls = recent_source_urls(WORKSPACE_DIR, days=3)
 
     if recently_used_urls:
         print(f"  🚫 Excluding {len(recently_used_urls)} recently used URLs")
         before = len(materials)
-        materials = [m for m in materials if m.get("url", "").rstrip("/") not in recently_used_urls]
+        materials = [m for m in materials if m.get("url", "").rstrip("/").lower() not in recently_used_urls]
         after = len(materials)
         if before != after:
             print(f"  Filtered out {before - after} materials (used in last 3 days)")

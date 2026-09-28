@@ -8,6 +8,7 @@ import time
 
 from content_platform.business.case_study.pipeline import run_case_study_pipeline
 from content_platform.business.daily_article.pipeline import run_daily_article_pipeline
+from content_platform.alerts import record_job_result
 from content_platform.curate.clustering import assign_clusters
 from content_platform.curate.scoring import editorial_fit_score, execution_detail_score, score_materials_batch
 from content_platform.cleanup import prune_old_platform_data
@@ -21,6 +22,7 @@ from content_platform.ingest.rss import load_rss_materials
 from content_platform.job_state import JobStateStore
 from content_platform.normalize.canonicalize import build_material_record
 from content_platform.paths import PlatformPaths
+from content_platform.recent_topics import append_topic
 from content_platform.storage.json_store import read_json
 from content_platform.storage.json_store import write_json
 
@@ -452,6 +454,10 @@ def run_collect_daily(
         "curate_file": str(paths.curate_dir(date_str) / "materials.json"),
         "article_pool_file": str(paths.datasets_dir(date_str) / "article_pool.json"),
         "case_pool_file": str(paths.datasets_dir(date_str) / "case_pool.json"),
+        "raw_material_count": len(raw_materials),
+        "curated_material_count": len(curated_materials),
+        "article_candidate_count": len(article_pool["candidates"]),
+        "case_candidate_count": len(case_pool["candidates"]),
     }
     store.write_job(job)
     return job
@@ -551,19 +557,28 @@ def _invoke_legacy_writer(script_path: Path, date_str: str, materials_file: str,
     # Generous budget for the WRITE stage now that publishing is decoupled into
     # a separate process. 900s covers writing + polish + image search + embed,
     # while per-call LLM timeouts/retries are governed centrally in lib/llm.py.
-    # P1-2: inject an absolute LLM deadline (epoch seconds) so call_model()
-    # short-circuits the OpenRouter->DeepSeek fallback before the parent
-    # timeout. 840s leaves ~60s headroom under the 900s parent budget.
+    # Inject an absolute LLM deadline (epoch seconds). 840s leaves ~60s
+    # headroom under the 900s parent budget.
     env = os.environ.copy()
-    # R1: single global budget (840s leaves ~60s headroom under the 900s
-    # parent). LLM_DEADLINE governs lib/llm.call_model; IMAGE_SEARCH_DEADLINE
+    # Single global budget (840s leaves ~60s headroom under the 900s parent).
+    # LLM_DEADLINE governs lib/llm.call_model; IMAGE_SEARCH_DEADLINE
     # governs the image-search stage (multi-image worst case can run hundreds
     # of seconds) so it can self-degrade to placeholders instead of blowing
     # the parent budget. Both are inherited by write_article.py and its child
     # image_search.py subprocesses.
     env["LLM_DEADLINE"] = str(time.time() + 840)
     env["IMAGE_SEARCH_DEADLINE"] = str(time.time() + 840)
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        stderr = f"{stderr}\nwriter timed out after 900 seconds".strip()
+        return subprocess.CompletedProcess(cmd, 124, stdout, stderr)
 
 
 def _write_job_log(job_dir: Path, filename: str, content: str) -> str:
@@ -634,12 +649,11 @@ def run_article_daily(
         article_count=2,
     )
     job["steps"] = [
-        {"name": "build_article_pool", "status": "success"},
-        {"name": "select_primary_cluster", "status": "success"},
+        {"name": "build_article_pool", "status": "success" if result.get("candidates") else "failed"},
+        {"name": "select_primary_cluster", "status": "success" if result.get("selections") else "failed"},
     ]
     job["status"] = result.get("status", "failed")
 
-    writer_all_stdouts: list[str] = []
     writer_all_exit_codes: list[int] = []
     writer_artifacts: dict = {}
 
@@ -660,24 +674,49 @@ def run_article_daily(
             # run's own freshly-collected material.
             if legacy_result.returncode == 0:
                 _persist_selected_content_hashes(mat_file, workspace_dir=resolved_workspace)
-            writer_all_stdouts.append(legacy_result.stdout or "")
             writer_all_exit_codes.append(legacy_result.returncode)
-            # Capture writer logs + return code (mirrors run_case_daily).
+            captured = _capture_writer_artifacts(job_dir, legacy_result)
+            writer_artifacts[f"writer_{i+1}_returncode"] = captured["writer_returncode"]
+            writer_artifacts[f"writer_{i+1}_stdout_log"] = captured["writer_stdout_log"]
+            writer_artifacts[f"writer_{i+1}_stderr_log"] = captured["writer_stderr_log"]
             if i == 0:
-                writer_artifacts = _capture_writer_artifacts(job_dir, legacy_result)
+                writer_artifacts.update(captured)
         else:
             writer_all_exit_codes.append(-1)
 
     job["artifacts"] = {
         "selection_file": result.get("selection_file"),
         "materials_file": result.get("materials_file"),
+        "input_material_count": len(input_materials),
+        "candidate_count": len(result.get("candidates", [])),
+        "selected_count": len(result.get("selections", [])),
         "writer_exit_codes": writer_all_exit_codes,
     }
     job["artifacts"].update(writer_artifacts)
 
-    all_success = all(c == 0 for c in writer_all_exit_codes)
+    all_success = bool(writer_all_exit_codes) and all(c == 0 for c in writer_all_exit_codes)
     if not all_success:
-        job["status"] = "partial" if len(materials_files) > 1 else "failed"
+        job["status"] = (
+            "partial"
+            if any(c == 0 for c in writer_all_exit_codes) and len(writer_all_exit_codes) > 1
+            else "failed"
+        )
+    job["steps"].append({"name": "write_articles", "status": "success" if all_success else "failed"})
+    health = record_job_result(
+        resolved_workspace,
+        "article-daily",
+        job["status"],
+        reason=(
+            f"no article candidates from {len(input_materials)} pool materials"
+            if not result.get("candidates")
+            else f"no selections after recent-topic filtering from {len(result.get('candidates', []))} candidates"
+            if not result.get("selections")
+            else f"writer exit codes: {writer_all_exit_codes}"
+            if job["status"] != "success"
+            else ""
+        ),
+    )
+    job["artifacts"]["health"] = health
     store.write_job(job)
     return job
 
@@ -700,17 +739,18 @@ def run_case_daily(
         materials=input_materials,
     )
     job["steps"] = [
-        {"name": "build_case_pool", "status": "success"},
-        {"name": "rank_case_candidates", "status": "success"},
+        {"name": "build_case_pool", "status": "success" if result.get("candidates") else "failed"},
+        {"name": "rank_case_candidates", "status": "success" if result.get("selected") else "failed"},
     ]
     job["status"] = result.get("status", "failed")
     job["artifacts"] = {
         "selection_file": result.get("selection_file"),
         "materials_file": result.get("materials_file"),
+        "input_material_count": len(input_materials),
+        "candidate_count": len(result.get("candidates", [])),
+        "selected_count": 1 if result.get("selected") else 0,
     }
     if job["status"] == "success" and result.get("materials_file"):
-        # Persist content hashes so a later-day reprint is deduped.
-        _persist_selected_content_hashes(result["materials_file"], workspace_dir=resolved_workspace)
         legacy_result = _invoke_legacy_writer(
             resolved_workspace / "decompose_case_study.py",
             date_str=date_str,
@@ -719,15 +759,23 @@ def run_case_daily(
         job["artifacts"].update(_capture_writer_artifacts(job_dir, legacy_result))
         if legacy_result.returncode != 0:
             job["status"] = "failed"
+            job["steps"].append({"name": "write_case_study", "status": "failed"})
         else:
-            # Close the case-daily dedup loop: record the committed source URLs
-            # so the next day's selection skips them (same registry the daily
-            # article pipeline writes to). Fixes OlmoEarth-style daily reprints.
+            job["steps"].append({"name": "write_case_study", "status": "success"})
+            # Mark the source used only after the case writer succeeds.
+            _persist_selected_content_hashes(result["materials_file"], workspace_dir=resolved_workspace)
             record_case_recent_topic(
                 result["materials_file"],
                 workspace_dir=resolved_workspace,
                 out_dir=job["artifacts"].get("writer_output_dir"),
             )
+    health = record_job_result(
+        resolved_workspace,
+        "case-daily",
+        job["status"],
+        reason="case selection or writer failed" if job["status"] != "success" else "",
+    )
+    job["artifacts"]["health"] = health
     store.write_job(job)
     return job
 
@@ -746,11 +794,10 @@ def record_case_recent_topic(
     workspace_dir: Path,
     out_dir: str | None = None,
 ) -> None:
-    """Record a committed case study's source URLs into _recent_topics.json.
+    """Record a committed case study in its case-only topic ledger.
 
-    This closes the dedup loop for case-daily: the daily-article pipeline
-    already logs source URLs there (see write_article._log_article_topic), and
-    the case-study selection now reads it to skip reprints. Without this,
+    Article topics are recorded separately; the shared source URL view still
+    prevents cross-format reprints. Without this,
     case studies never log their sources, so the same source URL keeps getting
     re-selected day after day (e.g. the Ai2 OlmoEarth weather-monitoring case
     that was published daily for days).
@@ -779,18 +826,8 @@ def record_case_recent_topic(
             digest = m.get("summary", "") or m.get("digest", "") or ""
     if not source_urls:
         return
-    recent_file = workspace_dir / "wechat-articles" / "_recent_topics.json"
-    recent_file.parent.mkdir(parents=True, exist_ok=True)
-    entries = []
-    if recent_file.exists():
-        try:
-            entries = read_json(recent_file)
-        except Exception:
-            entries = []
-    if not isinstance(entries, list):
-        entries = []
     from datetime import date as _date
-    entries.append({
+    append_topic(workspace_dir, "case", {
         "title": title,
         "digest": digest,
         "date": _date.today().isoformat(),
@@ -798,9 +835,7 @@ def record_case_recent_topic(
         "source_urls": source_urls[:5],
         "cluster_ids": [],
     })
-    entries = entries[-30:]
-    write_json(recent_file, entries)
-    print(f"  📌 Case recent-topic recorded: {source_urls[0][:60]}")
+    print(f"  📌 Case topic recorded separately: {source_urls[0][:60]}")
 
 
 def _record_case_dedup_guard(workspace_dir: Path) -> None:

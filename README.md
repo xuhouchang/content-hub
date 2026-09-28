@@ -105,7 +105,7 @@ platform/
 ├── lib/
 │   ├── __init__.py               # 共享工具（路径、URL注册表、去重、quick-filter）
 │   ├── env_loader.py             # .env自动加载
-│   ├── llm.py                    # LLM调用封装（OpenRouter）
+│   ├── llm.py                    # LLM调用封装（DeepSeek API直连）
 │   ├── materials.py              # 素材管理（读取/过滤/去重）
 │   ├── models.py                 # 模型配置（集中管理）
 │   └── page_utils.py             # 页面正文/链接提取工具（extract_page_summary 等）
@@ -180,7 +180,7 @@ platform/
 |------|------|
 | `lib/__init__.py` | 路径常量、URL注册表管理、去重逻辑、素材读取 |
 | `lib/env_loader.py` | 自动从 .env 文件加载环境变量 |
-| `lib/llm.py` | LLM调用封装：通过OpenRouter调用DeepSeek/OpenAI等模型，含重试逻辑 |
+| `lib/llm.py` | LLM调用封装：通过 DeepSeek API 直连，含有限重试和超时预算 |
 | `lib/materials.py` | 素材管理：读取/过滤/去重/采样 |
 | `lib/models.py` | 模型配置：集中管理各场景默认模型，支持环境变量覆盖 |
 
@@ -241,6 +241,12 @@ run_daily_article.sh
 > 三次失败后进入 `failed.jsonl`。队列状态见 `pending.jsonl`、`processing.jsonl`、
 > `done.jsonl` 与 `failed.jsonl`。
 
+文章与案例主题历史分别保存在 `wechat-articles/_article_topics.json` 和
+`wechat-articles/_case_topics.json`；来源 URL 仍跨类型去重。旧的
+`_recent_topics.json` 只在过渡期用于来源 URL 去重和可识别文章记录兼容。
+连续任务失败状态保存在 `platform/state/pipeline_health.json`，默认连续两次失败
+时在任务日志中输出本地告警；阈值可用 `PIPELINE_ALERT_AFTER_FAILURES` 调整。
+
 ### 每日案例拆解 (cron 10:00)
 
 ```
@@ -265,7 +271,9 @@ decompose_case_study.py --external
 | `SERPER_API_KEY` | Serper.dev搜索API密钥 | ✅ 采集时 |
 | `ANYSEARCH_API_KEY` | AnySearch搜索API密钥 | ✅ 采集时 |
 | `DEEPSEEK_API_KEY` | DeepSeek API密钥 | ✅ 写作/过滤时 |
-| `LLM_API_KEY` | LLM API密钥（兼容DeepSeek） | ✅ 写作时 |
+| `DEEPSEEK_MODEL` | DeepSeek API模型，默认 `deepseek-flash` | 否 |
+| `DEEPSEEK_REASONING_EFFORT` | 推理强度，默认 `low` | 否 |
+| `LLM_API_KEY` | `DEEPSEEK_API_KEY` 的兼容备用变量 | 否 |
 
 ## 数据目录
 

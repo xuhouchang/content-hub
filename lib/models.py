@@ -9,37 +9,33 @@ Usage:
     from lib.models import get_model
     model = get_model("writing")
 
-Environment variable overrides:
-    MODEL_WRITING      — 公众号写作 (default: google/gemini-3.7-flash)
-    MODEL_POLISH       — 润色       (default: google/gemini-3.7-flash)
-    MODEL_TOPIC        — 选题/素材打分与聚类打标签 (default: google/gemini-3.7-flash)
-    MODEL_CASE         — 案例拆解   (default: deepseek/deepseek-v4-flash)
-    MODEL_FILTER       — 素材过滤   (default: deepseek/deepseek-v4-flash)
-    MODEL_SYNTHESIS    — 周度整合   (default: deepseek/deepseek-v4-flash)
-    MODEL_FRAMEWORK    — 框架文章   (default: deepseek/deepseek-v4-flash)
-
-写作/润色/选题走强模型（Gemini 3.7 Flash），案例拆解/过滤/整合等批量环节走便宜模型（DeepSeek）。
-
-Legacy:
-    WRITING_MODEL env var is still respected as a blanket fallback.
-    DEFAULT_WRITING_MODEL in lib/llm.py remains for backward compat
-    but new code should prefer get_model().
+Environment variable overrides MODEL_WRITING, MODEL_POLISH, MODEL_TOPIC,
+MODEL_CASE, MODEL_FILTER, MODEL_SYNTHESIS, or MODEL_FRAMEWORK may select one
+of the models supported by the DeepSeek API. Legacy DeepSeek V4 Flash names
+are normalized to the current ``deepseek-flash`` API model ID.
 """
 
 import os
 from typing import Optional
 
+DEEPSEEK_FLASH = "deepseek-flash"
+DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL", DEEPSEEK_FLASH).strip() or DEEPSEEK_FLASH
 _MODELS = {
-    # 写作/润色用强模型（Gemini 3.7 Flash），保证文章质量
-    "writing":    os.environ.get("MODEL_WRITING",    "google/gemini-3.7-flash"),
-    "polish":     os.environ.get("MODEL_POLISH",     "google/gemini-3.7-flash"),
-    # 选题/素材打分与聚类打标签用强模型（Gemini 3.7 Flash）
-    "topic":      os.environ.get("MODEL_TOPIC",      "google/gemini-3.7-flash"),
-    # 案例拆解/过滤/整合等批量环节用便宜模型
-    "case":       os.environ.get("MODEL_CASE",       "deepseek/deepseek-v4-flash"),
-    "filter":     os.environ.get("MODEL_FILTER",     "deepseek/deepseek-v4-flash"),
-    "synthesis":  os.environ.get("MODEL_SYNTHESIS",  "deepseek/deepseek-v4-flash"),
-    "framework":  os.environ.get("MODEL_FRAMEWORK",  "deepseek/deepseek-v4-flash"),
+    purpose: os.environ.get(
+        f"MODEL_{purpose.upper()}",
+        os.environ.get("WRITING_MODEL", DEFAULT_MODEL) if purpose == "writing" else DEFAULT_MODEL,
+    )
+    for purpose in ("writing", "polish", "topic", "case", "filter", "synthesis", "framework")
+}
+
+_MODEL_ALIASES = {
+    "deepseek-v4-flash": DEEPSEEK_FLASH,
+    "deepseek/deepseek-v4-flash": DEEPSEEK_FLASH,
+    "deepseek-v4-flash-vision-exp": DEEPSEEK_FLASH,
+    "google/gemini-3.7-flash": DEEPSEEK_FLASH,
+    "openai/gpt-5.4": DEEPSEEK_FLASH,
+    "openai-codex/gpt-5.4": DEEPSEEK_FLASH,
+    "deepseek/deepseek-v4-pro": "deepseek-v4-pro",
 }
 
 
@@ -51,9 +47,10 @@ def get_model(purpose: str) -> str:
                  "synthesis", "framework".
 
     Returns:
-        Full model identifier string (e.g., "openai/gpt-5.4").
+        DeepSeek API model identifier.
     """
-    return _MODELS.get(purpose, os.environ.get("WRITING_MODEL", "openai/gpt-5.4"))
+    model = _MODELS.get(purpose, DEEPSEEK_FLASH)
+    return _MODEL_ALIASES.get(model.strip().lower(), model.strip())
 
 
 def _get_all_purposes():

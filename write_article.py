@@ -32,6 +32,7 @@ from typing import Optional
 from lib.llm import call_model
 from lib import pexels_images as px
 from lib.models import get_model
+from content_platform.recent_topics import append_topic, recent_topics
 
 # ── Polish script reference ──（移到 COLLECTOR_DIR 定义之后）
 from lib.materials import (
@@ -672,7 +673,13 @@ def check_article_quality(
     }
     passed_count = sum(1 for v in checks.values() if v)
 
-    hard_fail = not (checks["has_thesis"] and checks["has_mechanism"] and checks["no_empty_content"])
+    hard_fail = not (
+        checks["has_thesis"]
+        and checks["has_mechanism"]
+        and checks["has_evidence"]
+        and checks["has_source_traceability"]
+        and checks["no_empty_content"]
+    )
     passed = (not hard_fail) and passed_count >= 6
 
     if not checks["no_empty_content"]:
@@ -681,6 +688,10 @@ def check_article_quality(
         reasons.append("缺少可复述的核心判断")
     if not checks["has_mechanism"]:
         reasons.append("缺少机制链")
+    if not checks["has_evidence"]:
+        reasons.append("缺少可核实的事实或证据")
+    if not checks["has_source_traceability"]:
+        reasons.append("缺少可追溯来源")
     if passed_count < 6:
         reasons.append(f"通过 {passed_count}/8，低于 6 项门槛")
 
@@ -786,7 +797,7 @@ def extract_digest(response: str) -> str:
 
 
 # ── Recent article topic tracking ──
-RECENT_TOPICS_FILE = OUTPUT_BASE / "_recent_topics.json"
+RECENT_TOPICS_FILE = OUTPUT_BASE / "_article_topics.json"
 
 
 def _log_article_topic(
@@ -804,11 +815,7 @@ def _log_article_topic(
     be selected again by get_all_collected_urls().
     """
     try:
-        RECENT_TOPICS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        entries = []
-        if RECENT_TOPICS_FILE.exists():
-            entries = json.loads(RECENT_TOPICS_FILE.read_text(encoding="utf-8"))
-        entries.append({
+        append_topic(OUTPUT_BASE.parent, "article", {
             "title": title,
             "digest": digest,
             "date": datetime.date.today().isoformat(),
@@ -816,9 +823,6 @@ def _log_article_topic(
             "source_urls": source_urls[:5],
             "cluster_ids": cluster_ids or [],
         })
-        # Keep only last 30 entries
-        entries = entries[-30:]
-        RECENT_TOPICS_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # ── Also mark source URLs as used in all_urls.tsv ──
         marked = 0
@@ -876,12 +880,8 @@ def _load_recent_articles() -> list[dict]:
     Returns list of dicts with title, digest, date.
     """
     try:
-        if RECENT_TOPICS_FILE.exists():
-            entries = json.loads(RECENT_TOPICS_FILE.read_text(encoding="utf-8", errors="replace"))
-            if isinstance(entries, list):
-                return entries[-6:]  # last 6 articles
-            elif isinstance(entries, dict) and "articles" in entries:
-                return entries["articles"][-6:]
+        entries = recent_topics(OUTPUT_BASE.parent, "article", days=30)
+        return entries[-6:]
     except Exception:
         pass
     return []
@@ -1517,22 +1517,19 @@ def write_article(
         for s in sampled
         if s.get("dedup", {}).get("cluster_id")
     })
-    _log_article_topic(
-        title,
-        digest,
-        output_dir,
-        [s["url"] for s in sampled],
-        cluster_ids=sampled_cluster_ids,
-        # 2026-08-02 修复 OlmoEarth 连续重选题根因：
-        # 之前 mark_source_urls=not bool(materials_override)，而每日管线
-        # runtime.py 恒以 --materials 调用本文，导致 materials_override=True
-        # → 永不为 False → 从不在 all_urls.tsv 标记 used →
-        # sample_materials 的 filter_used_materials 永远拦不住已用素材。
-        # 已用素材无论以何种方式写入都应标记 used，因此恒为 True。
-        mark_source_urls=True,
-    )
+    if quality["passed"]:
+        _log_article_topic(
+            title,
+            digest,
+            output_dir,
+            [s["url"] for s in sampled],
+            cluster_ids=sampled_cluster_ids,
+            mark_source_urls=True,
+        )
+    else:
+        print("  ⚠️ Article failed quality gate; topic and source usage were not recorded")
 
-    # Step 6: Polish article with OpenAI via OpenRouter
+    # Step 6: Polish article through the configured DeepSeek API model.
     # Done BEFORE image matching — text must be finalized first
     t_polish_start = time.time()
     print("\n6️⃣  Polishing article...")
@@ -1738,7 +1735,7 @@ def main():
     parser.add_argument("--max-materials", type=int, default=5,
                         help="Maximum materials to include in context")
     parser.add_argument("--model", type=str, default=get_model("writing"),
-                        help="Writing model. Default: openai/gpt-5.4 (OpenRouter)")
+                        help="DeepSeek API model. Default: deepseek-flash")
     parser.add_argument("--materials", type=str, default=None,
                         help="Path to JSON file with pre-loaded materials. "
                              "Each item: {\"url\": \"...\", \"content\": \"...\"}. "
@@ -1769,6 +1766,8 @@ def main():
     output_dir = write_article(date_str, dry_run=args.dry_run, max_materials=args.max_materials, model=args.model, materials_override=materials_override)
 
     if output_dir:
+        exit_code = 0
+        article_status = "generated"
         # Stage A ends at the queue boundary. An independently scheduled worker
         # consumes the record and creates a WeChat draft; the writer never
         # starts or waits for the sender.
@@ -1788,17 +1787,24 @@ def main():
             if not quality_passed:
                 print("  ⛔ 质量闸门未通过 — 不进入发布队列，文章已作为待修草稿保留")
                 print(f"     Output preserved (待人工审核/补素材): {output_dir}")
+                article_status = "quality_rejected"
+                exit_code = 2
             elif enqueue_for_publish(output_dir, digest):
                 print(f"  📋 Queued for async publish (draft): {QUEUE_DIR / 'pending.jsonl'}")
                 print("  ⏳ Independent publish worker will consume the queue")
+                article_status = "queued"
             else:
-                print(f"  ⚠️ Failed to enqueue for publish (see warnings above)")
+                # False means the idempotency guard found this output in a
+                # queue state already; it is not a second-enqueue failure.
+                print("  ↺ Already queued or resolved; duplicate enqueue skipped")
+                article_status = "already_queued_or_resolved"
 
         print(f"\n{'='*60}")
         print(f"✅ Article pipeline complete!")
         print(f"   Output: {output_dir}")
+        print(f"   ARTICLE_STATUS={article_status}")
         print(f"{'='*60}")
-        return 0
+        return exit_code
     else:
         print(f"\n{'='*60}")
         print(f"❌ Article pipeline failed")

@@ -29,6 +29,7 @@ import sys
 import time
 from pathlib import Path
 
+from content_platform.alerts import record_job_result
 from publish_queue import (
     DONE,
     FAILED,
@@ -50,6 +51,7 @@ WECHAT_PUBLISH = SCRIPT_DIR / "wechat_publish.py"
 PARENT_TIMEOUT = 900
 MAX_ATTEMPTS = 3
 BASE_RETRY_SECONDS = 300
+LAST_TERMINAL_FAILURES = 0
 
 
 def _ts() -> str:
@@ -246,6 +248,8 @@ def _acquire_lock():
 
 
 def process_once(quiet_empty: bool = False) -> int:
+    global LAST_TERMINAL_FAILURES
+    LAST_TERMINAL_FAILURES = 0
     fd = _acquire_lock()
     if fd is None:
         print(f"[{_ts()}] ⚠️ Another publish worker is running; skipping this run")
@@ -259,6 +263,9 @@ def process_once(quiet_empty: bool = False) -> int:
                 print(f"[{_ts()}] Queue empty. Nothing to publish.")
             return 0
         processed = 0
+        run_failures = 0
+        terminal_failures = 0
+        terminal_errors = []
         for rec in records:
             od = rec.get("output_dir", "")
             if od in _done_set():
@@ -280,6 +287,7 @@ def process_once(quiet_empty: bool = False) -> int:
                 print(f"[{_ts()}] ✅ Draft created: {od} (media_id={media_id[:12]}...)")
                 processed += 1
             except Exception as e:
+                run_failures += 1
                 attempts = int(rec.get("attempts", 0)) + 1
                 error = str(e)[:500]
                 if attempts < MAX_ATTEMPTS:
@@ -299,6 +307,8 @@ def process_once(quiet_empty: bool = False) -> int:
                         f"scheduled in {delay}s: {od}: {error}"
                     )
                 else:
+                    terminal_failures += 1
+                    terminal_errors.append(error)
                     _move(
                         rec,
                         FAILED,
@@ -307,6 +317,16 @@ def process_once(quiet_empty: bool = False) -> int:
                     print(f"[{_ts()}] ❌ Failed permanently after {attempts} attempts: {od}: {error}")
             finally:
                 _unmark_processing(rec)
+        LAST_TERMINAL_FAILURES = terminal_failures
+        if run_failures:
+            record_job_result(
+                SCRIPT_DIR,
+                "publish-worker",
+                "failed",
+                reason="; ".join(terminal_errors[:3]) or f"{run_failures} publish attempt(s) scheduled for retry",
+            )
+        elif processed:
+            record_job_result(SCRIPT_DIR, "publish-worker", "success")
         return processed
     finally:
         try:
@@ -336,7 +356,8 @@ def main():
         n = process_once(quiet_empty=args.quiet_empty)
         if n or not args.quiet_empty:
             print(f"[{_ts()}] Publish worker done. Processed {n} article(s).")
+        return 1 if LAST_TERMINAL_FAILURES else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

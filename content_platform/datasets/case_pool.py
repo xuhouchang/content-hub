@@ -1,41 +1,15 @@
 """Build case-study candidate pool from curated materials."""
 
-import datetime
-import json
 from pathlib import Path
+from content_platform.recent_topics import recent_cluster_ids
 
 CASE_DETAIL_THRESHOLD = 0.6
 PRIMARY_TOPIC_THRESHOLD = 0.65
 
-# _recent_topics.json is written by write_article.py after each publish
-_RECENT_TOPICS_FILE = (
-    Path(__file__).resolve().parent.parent.parent
-    / "wechat-articles"
-    / "_recent_topics.json"
-)
-
-
 def _used_cluster_ids(days: int = 7) -> set[str]:
-    """Read recently published articles from _recent_topics.json and extract cluster_ids."""
-    if not _RECENT_TOPICS_FILE.exists():
-        return set()
-    try:
-        entries = json.loads(_RECENT_TOPICS_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return set()
-    cutoff = datetime.date.today() - datetime.timedelta(days=days)
-    used: set[str] = set()
-    for e in entries:
-        try:
-            d = datetime.date.fromisoformat(e.get("date", "2000-01-01"))
-        except ValueError:
-            continue
-        if d < cutoff:
-            continue
-        cids = e.get("cluster_ids", [])
-        if cids:
-            used.update(cids)
-    return used
+    """Read recently used case-study clusters from the case-only ledger."""
+    workspace_dir = Path(__file__).resolve().parent.parent.parent
+    return recent_cluster_ids(workspace_dir, "case", days=days)
 
 
 def _recent_cluster_ids(topic_memory: dict) -> set[str]:

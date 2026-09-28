@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-LLM call encapsulation for the collector pipeline.
-
-Unified call_model() that routes all models through OpenRouter API.
-- "deepseek-v4-flash": deepseek/deepseek-v4-flash on OpenRouter
-- "openai-codex/gpt-5.4" or "openai/gpt-5.4": OpenAI GPT-5.4 on OpenRouter
-- Any other model identifier is passed as-is to OpenRouter.
-"""
+"""LLM calls for the content pipeline, routed directly to the DeepSeek API."""
 
 import json
 import os
@@ -29,24 +22,28 @@ if _dotenv_path.exists():
             if value and not os.environ.get(key):
                 os.environ[key] = value
 
-# ── OpenRouter Config ──
+# Retained for explicit legacy call_openrouter() imports. call_model() never
+# uses this provider after the DeepSeek-only routing change.
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "") or os.environ.get("LLM_API_KEY", "")
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 # ── DeepSeek Direct Config ──
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", os.environ.get("LLM_API_KEY", ""))
-DEEPSEEK_BASE = "https://api.deepseek.com/v1"
-
-# ── Model Aliases ──
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "") or os.environ.get("LLM_API_KEY", "")
+DEEPSEEK_BASE = "https://api.deepseek.com"
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash").strip()
+DEEPSEEK_MODELS = {"deepseek-flash", "deepseek-v4-pro"}
 MODEL_ALIASES = {
+    "deepseek-v4-flash": "deepseek-flash",
+    "deepseek/deepseek-v4-flash": "deepseek-flash",
+}
+
+OPENROUTER_MODEL_ALIASES = {
     "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
     "openai-codex/gpt-5.4": "openai/gpt-5.4",
 }
 
 # ── Default Writing Model ──
-# Use "deepseek-v4-flash" for DeepSeek (cheaper, fine for filtration/clustering)
-# Use "openai/gpt-5.4" for actual writing
-DEFAULT_WRITING_MODEL = os.environ.get("WRITING_MODEL", "deepseek-v4-flash")
+DEFAULT_WRITING_MODEL = DEEPSEEK_MODEL
 
 # ── Per-call timeout / retry budget (governed centrally) ──
 # These were previously hardcoded (OpenRouter 180s/3 retries, DeepSeek
@@ -56,15 +53,9 @@ DEFAULT_WRITING_MODEL = os.environ.get("WRITING_MODEL", "deepseek-v4-flash")
 #
 # P2-6: long-form writing uses max_tokens=8192, which can take well over the
 # old 120s — bump the default per-call timeout to 300s to avoid false timeouts.
-# P1-2: the global budget is injected by content_platform/runtime.py via the
-# LLM_DEADLINE env var (absolute epoch-seconds). call_model() reads it as the
-# default deadline so the OpenRouter->DeepSeek fallback short-circuits before
-# blowing the 900s parent budget.
+# The global budget is injected by content_platform/runtime.py via LLM_DEADLINE.
 LLM_CALL_TIMEOUT = int(os.environ.get("LLM_CALL_TIMEOUT", "300"))
-# Retries trimmed 3->2 (P0) and 2->1 (P1-2) so the worst case per call_model
-# stays bounded: 1 attempt x 300s OpenRouter + 1 attempt x 300s DeepSeek = 600s
-# worst, comfortably under the 900s parent and the LLM_DEADLINE budget. The
-# OpenRouter->DeepSeek cross-provider fallback still provides redundancy.
+# Keep retries bounded so each call remains within the writer deadline.
 LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "1"))
 # Extra finite retries specifically for an EMPTY content response (reasoning
 # models occasionally burn budget and return content=""). These are bounded and
@@ -79,7 +70,7 @@ LLM_DEADLINE = float(os.environ["LLM_DEADLINE"]) if os.environ.get("LLM_DEADLINE
 
 def resolve_model(model_id: str) -> str:
     """Resolve model alias to OpenRouter model ID."""
-    return MODEL_ALIASES.get(model_id, model_id)
+    return OPENROUTER_MODEL_ALIASES.get(model_id, model_id)
 
 
 def call_openrouter(
@@ -188,23 +179,38 @@ def call_deepseek_direct(
     max_tokens: int = None,
     max_retries: int = None,
     deadline: Optional[float] = None,
+    model: str = None,
 ) -> Optional[str]:
     """Call DeepSeek Chat directly via their API."""
+    model = (model or DEEPSEEK_MODEL).strip().lower()
+    legacy_model_ids = {
+        "deepseek-v4-flash": "deepseek-flash",
+        "deepseek/deepseek-v4-flash": "deepseek-flash",
+        "deepseek-v4-flash-vision-exp": "deepseek-flash",
+        "google/gemini-3.7-flash": "deepseek-flash",
+        "openai/gpt-5.4": "deepseek-flash",
+        "openai-codex/gpt-5.4": "deepseek-flash",
+    }
+    model = legacy_model_ids.get(model, model)
+    if model not in DEEPSEEK_MODELS:
+        raise ValueError(
+            f"Unsupported DeepSeek API model '{model}'. "
+            f"Choose one of: {', '.join(sorted(DEEPSEEK_MODELS))}."
+        )
+    if not DEEPSEEK_API_KEY:
+        print("  ❌ DEEPSEEK_API_KEY is not configured")
+        return None
     if max_retries is None:
         max_retries = LLM_MAX_RETRIES
     timeout = LLM_CALL_TIMEOUT
 
     url = f"{DEEPSEEK_BASE}/chat/completions"
     payload = {
-        "model": "deepseek-v4-flash",
+        "model": model,
         "messages": messages,
         "temperature": temperature,
-        # deepseek-v4-flash is a REASONING model: reasoning_content shares the
-        # max_tokens budget with content, and reasoning length is unpredictable.
-        # We deliberately OMIT max_tokens entirely (老板要求：不限制 Max token)，
-        # so generation runs to natural completion instead of being hard-capped
-        # and left with empty/truncated content.
-        "reasoning_effort": "low",
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": os.environ.get("DEEPSEEK_REASONING_EFFORT", "low"),
     }
     # NOTE: 不写入 max_tokens 字段。DeepSeek 直连统一不限制输出长度，
     # 让 reasoning + content 各自自然跑完，避免截断/空卡。
@@ -242,8 +248,8 @@ def call_deepseek_direct(
                 if last_user:
                     phase = (str(last_user)[:40].replace("\n", " ")) if isinstance(last_user, str) else phase
             reason_note = "truncated-by-length" if finish == "length" else f"finish={finish or 'empty'}"
-            print(f"  ⚠️ DeepSeek Direct: EMPTY content (attempt {attempt+1}/{max_retries}, "
-                  f"model=deepseek-v4-flash, phase='{phase}', {reason_note}, "
+            print(f"  ⚠️ DeepSeek API: EMPTY content (attempt {attempt+1}/{max_retries}, "
+                  f"model={model}, phase='{phase}', {reason_note}, "
                   f"reasoning={len(reasoning)} tokens). Retrying empty response.")
             # Fall through to the end of the loop body, which sleeps and retries.
         except urllib.error.HTTPError as e:
@@ -253,7 +259,7 @@ def call_deepseek_direct(
                 err_msg = err_data.get("error", {}).get("message", body[:200])
             except json.JSONDecodeError:
                 err_msg = body[:200]
-            print(f"  ⚠️ DeepSeek Direct attempt {attempt + 1}/{max_retries}: {e.code} {err_msg}")
+            print(f"  ⚠️ DeepSeek API attempt {attempt + 1}/{max_retries}: {e.code} {err_msg}")
             if e.code == 429:
                 wait = (attempt + 1) * 15
                 print(f"  Rate limited. Waiting {wait}s...")
@@ -265,7 +271,7 @@ def call_deepseek_direct(
             else:
                 return None
         except Exception as e:
-            print(f"  ⚠️ DeepSeek Direct attempt {attempt + 1}/{max_retries}: {e}")
+            print(f"  ⚠️ DeepSeek API attempt {attempt + 1}/{max_retries}: {e}")
             if attempt < max_retries - 1:
                 wait = (attempt + 1) * 10
                 time.sleep(wait)
@@ -277,7 +283,7 @@ def call_deepseek_direct(
         if deadline is not None and time.time() > deadline:
             print(f"  ⚠️ DeepSeek deadline exceeded during empty retry; aborting")
             return None
-        print(f"  🔁 DeepSeek Direct empty-content retry {rtry}/{LLM_EMPTY_RETRIES}...")
+        print(f"  🔁 DeepSeek API empty-content retry {rtry}/{LLM_EMPTY_RETRIES}...")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
@@ -286,10 +292,10 @@ def call_deepseek_direct(
             if content and content.strip():
                 return content
             reasoning = raw_msg.get("reasoning_content") or ""
-            print(f"  ⚠️ DeepSeek Direct: still empty after retry {rtry} "
+            print(f"  ⚠️ DeepSeek API: still empty after retry {rtry} "
                   f"(reasoning={len(reasoning)} tokens)")
         except Exception as e:
-            print(f"  ⚠️ DeepSeek Direct empty retry {rtry}/{LLM_EMPTY_RETRIES}: {e}")
+            print(f"  ⚠️ DeepSeek API empty retry {rtry}/{LLM_EMPTY_RETRIES}: {e}")
     return None
 
 
@@ -302,7 +308,7 @@ def call_model(
 ) -> Optional[str]:
     """Call the configured model.
 
-    Priority: DeepSeek direct → OpenRouter fallback.
+    Calls only the DeepSeek API. Provider and model failures remain explicit.
 
     Args:
         messages: List of dicts with 'role' and 'content' keys.
@@ -313,51 +319,26 @@ def call_model(
     Returns:
         Response text string, or None on failure.
     """
-    # P1-2: use the globally-injected deadline (LLM_DEADLINE, set by
-    # runtime.py) when no explicit deadline is passed. This makes the
-    # per-attempt short-circuit in call_openrouter/call_deepseek_direct
-    # actually fire instead of being dead code.
+    # Use the globally-injected deadline when no explicit deadline is passed.
     if deadline is None:
         deadline = LLM_DEADLINE
-    # R1: if the global budget is already exhausted, abort remaining LLM calls
-    # immediately instead of spending the last seconds on a provider that will
-    # also fail. This is the LLM stage's contribution to the auto-degrade so
-    # the writer always finishes and publishes within the 900s parent budget.
     if deadline is not None and time.time() > deadline:
         print("⏱️ deadline exceeded, aborting remaining LLM calls")
         return None
     model = model or DEFAULT_WRITING_MODEL
 
-    # ── 固化模型路由规则（不依赖 Skills / agent prompt）──
-    # 强模型（openai/gpt 系、google/gemini 系）→ 走 OpenRouter；失败后 fallback DeepSeek 直连
-    # DeepSeek 系模型（deepseek/deepseek-v4-flash 等）：只走 DeepSeek 直连（便宜）
-    # 2016-08 修正：google/gemini-* 之前误落入 else 分支被硬编码成 DeepSeek 直连，
-    # 导致配置为 Gemini 3.7 Flash 的实际请求全都打到了 deepseek-v4-flash。
-    # 现在 Gemini 等 OpenRouter 托管的强模型走 OpenRouter，真正命中 Gemini。
-    # ─────────────────────────────────────────
-    if model and (_is_openrouter_strong_model(model)):
-        # GPT / Gemini 系列 → 走 OpenRouter
-        result = call_openrouter(messages, model=model, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
-        if result and result.strip():
-            return result
-        print("  OpenRouter failed, falling back to DeepSeek direct...")
-        return call_deepseek_direct(messages, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
-
-    # DeepSeek / 其他模型 → 只走 DeepSeek 直连，不 fallback 到 OpenRouter
-    result = call_deepseek_direct(messages, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
+    result = call_deepseek_direct(
+        messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        deadline=deadline,
+        model=model or DEFAULT_WRITING_MODEL,
+    )
     # Defensive: never leak an empty/whitespace string upstream — callers must
     # be able to rely on `if not result` and on result.strip() being safe.
     return result if (result and result.strip()) else None
 
 
 def _is_openrouter_strong_model(model: str) -> bool:
-    """Return True if ``model`` should be routed through OpenRouter.
-
-    Strong writing/polish/topic models (OpenAI GPT, Google Gemini) are hosted
-    by OpenRouter; cheap/models available on DeepSeek direct stay on DeepSeek.
-    """
-    model_l = (model or "").lower()
-    return (
-        "openai/" in model_l or "gpt" in model_l
-        or "google/" in model_l or "gemini" in model_l
-    )
+    """Legacy helper retained for imports; call_model always routes direct."""
+    return False

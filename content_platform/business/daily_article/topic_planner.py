@@ -1,41 +1,25 @@
 """Topic planner: pick N distinct clusters, avoiding semantic topic repeat."""
 
-import datetime
 import json
 import re
 import sys
 from pathlib import Path
 from typing import Optional
+from content_platform.recent_topics import recent_source_urls, recent_topics
 
-# ── Recent topics file ──
-RECENT_TOPICS_FILE = (
-    Path(__file__).resolve().parent.parent.parent.parent
-    / "wechat-articles"
-    / "_recent_topics.json"
-)
+WORKSPACE_DIR = Path(__file__).resolve().parents[3]
 
 
 def _load_recent_topics(days: int = 7) -> list[dict]:
-    """Load recent article topics from _recent_topics.json (last `days` days)."""
-    if not RECENT_TOPICS_FILE.exists():
-        return []
-    try:
-        entries = json.loads(RECENT_TOPICS_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
-    cutoff = datetime.date.today() - datetime.timedelta(days=days)
-    return [
-        e
-        for e in entries
-        if datetime.date.fromisoformat(e.get("date", "2000-01-01")) >= cutoff
-    ]
+    """Load article-only topic history; case topics live in their own ledger."""
+    return recent_topics(WORKSPACE_DIR, "article", days=days)
 
 
 def _llm_judge_topic_similar(
     new_title: str,
     new_digest: Optional[str],
     recent_topics: list[dict],
-    model: str = "deepseek-v4-flash",
+    model: str = "deepseek-flash",
 ) -> bool:
     """Ask LLM whether new_title+new_digest is too similar to any recent topic.
 
@@ -55,27 +39,24 @@ def _llm_judge_topic_similar(
 
     prompt = f"""你是一个内容选题判断助手。判断下面的新选题是否与近期的已发布文章主题高度相似。
 
-=== 近期已发布文章（7天内） ===
+=== 近期文章主题（7天内） ===
 {recent_text}
 
 === 新选题 ===
 标题: {new_title}
 摘要: {new_digest or ""}
 
-请判断：新选题与上述任何一篇近期文章的主题是否**本质上是一个核心议题**。
-特别注意以下情况也视为重复（即应回答 SIMILAR）：
-- 同一个原始 Source 文章，只是换了不同的中文标题和案例来写
-- 讨论的是同一个商业趋势/现象
+请比较新选题相对每篇近期文章带来的独立增量。
+只有在同一素材/核心论点被换标题复述，且没有新增证据、实施机制、决策含义或适用边界时，才判为 REPEAT。
+主题属于同一大方向本身不构成重复；只要至少有一项实质独立增量，就判为 INCREMENT。
 
-只有确认核心议题完全不同才回答 DISTINCT。
+如果没有独立增量，回复「REPEAT」。
+如果有独立增量或主题不同，回复「INCREMENT」。
 
-如果「是同一个核心议题」，回复「SIMILAR」
-如果「是不同的核心议题」，回复「DISTINCT」
-
-只回复 SIMILAR 或 DISTINCT。"""
+只回复 REPEAT 或 INCREMENT。"""
 
     # Call LLM via lib.llm.call_model
-    sys.path.insert(0, str(RECENT_TOPICS_FILE.parent.parent))
+    sys.path.insert(0, str(WORKSPACE_DIR))
     from lib.llm import call_model
 
     messages = [
@@ -89,12 +70,12 @@ def _llm_judge_topic_similar(
               "(URL/title dedup already applied)")
         return False
     cleaned = re.sub(r"[^A-Z]", "", resp.strip().upper())
-    return "SIMILAR" in cleaned
+    return cleaned == "REPEAT"
 
 
-def _load_recent_source_urls(recent_topics: list[dict]) -> set[str]:
-    """Collect all source URLs from recent topics (normalized)."""
-    recent_urls: set[str] = set()
+def _load_recent_source_urls(recent_topics: list[dict], days: int = 7) -> set[str]:
+    """Collect cross-format source URLs while keeping topic histories separate."""
+    recent_urls = recent_source_urls(WORKSPACE_DIR, days=days)
     for t in recent_topics:
         for url in t.get("source_urls", []):
             recent_urls.add(url.rstrip("/"))
@@ -105,7 +86,7 @@ def pick_top_n_clusters(
     candidates: list[dict],
     n: int = 2,
     topic_diversity_days: int = 7,
-    model: str = "deepseek-v4-flash",
+    model: str = "deepseek-flash",
 ) -> list[dict]:
     """Pick the top N cluster leaders, filtering out topics similar to recent articles.
 
@@ -128,7 +109,7 @@ def pick_top_n_clusters(
 
     recent_topics = _load_recent_topics(days=topic_diversity_days)
     recent_titles = {t.get("title", "") for t in recent_topics}
-    recent_source_urls = _load_recent_source_urls(recent_topics)
+    recent_source_url_set = _load_recent_source_urls(recent_topics, days=topic_diversity_days)
 
     # Sort candidates by editorial_fit_score DESC
     sorted_candidates = sorted(
@@ -168,10 +149,17 @@ def pick_top_n_clusters(
         else:
             print("  ⚠️ Executive-value ranking unavailable; using editorial_fit order")
 
+    # Semantic rejections in the first shortlist should not end selection when
+    # good candidates remain. Keep the LLM check bounded to avoid a large burst
+    # of per-candidate calls on the cross-day pool.
+    shortlisted_ids = {id(m) for m in top_candidates}
+    remaining = [m for m in sorted_candidates if id(m) not in shortlisted_ids]
+    candidates_to_check = (top_candidates + remaining)[:max(top_k + n * 2, n)]
+
     selected: list[dict] = []
     seen_clusters: set[str] = set()
 
-    for m in top_candidates:
+    for m in candidates_to_check:
         if len(selected) >= n:
             break
 
@@ -185,7 +173,7 @@ def pick_top_n_clusters(
         candidate_url = (m.get("canonical_url", "") or m.get("url", "")).rstrip("/")
 
         # ── Layer 1: URL-level dedup ──
-        if recent_source_urls and candidate_url in recent_source_urls:
+        if recent_source_url_set and candidate_url.lower() in recent_source_url_set:
             print(f"  ⏭️  Skipping (same source URL used recently): {title[:50]}")
             continue
 
@@ -214,7 +202,7 @@ def pick_top_n_clusters(
     return selected
 
 
-def _llm_rank_executive_value(candidates: list[dict], model: str = "deepseek-v4-flash") -> dict[str, float]:
+def _llm_rank_executive_value(candidates: list[dict], model: str = "deepseek-flash") -> dict[str, float]:
     """Ask the LLM to score the executive-insight (段位) value of candidates.
 
     Returns {url: executive_score(0-10)}. A high score means the candidate can
@@ -265,7 +253,7 @@ def _llm_rank_executive_value(candidates: list[dict], model: str = "deepseek-v4-
 ]
 ```"""
 
-    sys.path.insert(0, str(RECENT_TOPICS_FILE.parent.parent))
+    sys.path.insert(0, str(WORKSPACE_DIR))
     from lib.llm import call_model
 
     messages = [{"role": "user", "content": prompt}]

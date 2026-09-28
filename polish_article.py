@@ -6,11 +6,11 @@ Article Polisher — 文章润色校验脚本。
 把文章从英文翻译/机器初稿润色成适合中国公众号读者的自然中文。
 
 用法：
-  python3 polish_article.py <article.md> [--dry-run] [--model openai/gpt-5.4]
+  python3 polish_article.py <article.md> [--dry-run] [--model deepseek-flash]
 
 流程：
   1. 读取完整 article.md（含 IMAGE 占位符）
-  2. 调用 OpenAI 模型（走 OpenRouter）执行润色
+  2. 调用 DeepSeek API 执行润色
   3. 用润色后的内容覆盖 article.md
   4. 如发现需人工确认项，追加到文章末尾
 """
@@ -291,7 +291,7 @@ def main():
         "--model",
         type=str,
         default=get_model("polish"),
-        help="Model to use for polishing (default: GPT-5.5 via OpenRouter)",
+        help="DeepSeek API model to use for polishing (default: deepseek-flash)",
     )
     parser.add_argument(
         "--dry-run",
