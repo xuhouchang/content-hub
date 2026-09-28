@@ -76,7 +76,9 @@ def test_funnel_reports_known_stages_with_evidence(tmp_path: Path):
     assert stages["qualified_finals"]["count"] == 1
     assert stages["enqueued"]["count"] == 1
     assert stages["drafts_done"]["count"] == 0
-    assert run["failure_class"] == "wechat_failure"
+    # Pending is not-yet-published, not a WeChat failure.
+    assert run["failure_class"] == ""
+    assert run["queue_state"] == "pending"
     assert any("job.json" in path or "jobs" in path for path in stages["collected"]["evidence"])
     # Markdown renders without touching disk.
     assert "| date |" in render_markdown(funnel)
@@ -96,6 +98,72 @@ def test_funnel_marks_missing_history_unknown(tmp_path: Path):
         "reason": "queue records for this date",
     }
     assert run["failure_class"] == ""
+
+
+def test_funnel_queue_only_date_is_discovered_with_unknown_upstream(tmp_path: Path):
+    # Regression: 2026-08-23 exists only in the queue, not in jobs/datasets.
+    date = "2026-08-23"
+    _write_records(
+        tmp_path / "queue" / "pending.jsonl",
+        [
+            {"output_dir": f"/tmp/q{i}", "enqueued_at": f"{date}T06:10:0{i}+08:00"}
+            for i in range(3)
+        ],
+    )
+
+    funnel = build_funnel(tmp_path)
+    dates = [run["date"] for run in funnel["runs"]]
+    assert date in dates, dates
+    run = next(r for r in funnel["runs"] if r["date"] == date)
+
+    for key in ("collected", "scored", "article_candidates", "selected", "qualified_finals"):
+        assert run["stages"][key]["status"] == "unknown", key
+        assert run["stages"][key]["count"] is None, key
+    assert run["stages"]["enqueued"]["count"] == 3
+    assert run["queue_state"] == "pending"
+    assert run["failure_class"] == ""
+
+
+def _queue_only_date(tmp_path: Path, state: str, records: list[dict]) -> dict:
+    _write_records(tmp_path / "queue" / f"{state}.jsonl", records)
+    return build_funnel(tmp_path, date_str="2026-08-24")["runs"][0]
+
+
+def test_funnel_queue_state_pending_only(tmp_path: Path):
+    run = _queue_only_date(
+        tmp_path, "pending", [{"output_dir": "/tmp/p", "enqueued_at": "2026-08-24T06:00:00+08:00"}]
+    )
+    assert run["queue_state"] == "pending"
+    assert run["failure_class"] == ""
+
+
+def test_funnel_queue_state_processing_only(tmp_path: Path):
+    run = _queue_only_date(
+        tmp_path, "processing", [{"output_dir": "/tmp/p", "enqueued_at": "2026-08-24T06:00:00+08:00"}]
+    )
+    assert run["queue_state"] == "processing"
+    assert run["failure_class"] == ""
+
+
+def test_funnel_queue_state_done(tmp_path: Path):
+    run = _queue_only_date(
+        tmp_path,
+        "done",
+        [{"output_dir": "/tmp/d", "enqueued_at": "2026-08-24T06:00:00+08:00", "media_id": "M1"}],
+    )
+    assert run["queue_state"] == "done"
+    assert run["failure_class"] == ""
+    assert run["stages"]["drafts_done"]["count"] == 1
+
+
+def test_funnel_queue_state_failed_is_wechat_failure(tmp_path: Path):
+    run = _queue_only_date(
+        tmp_path,
+        "failed",
+        [{"output_dir": "/tmp/f", "enqueued_at": "2026-08-24T06:00:00+08:00", "attempts": 3, "error": "errcode 40164"}],
+    )
+    assert run["queue_state"] == "failed"
+    assert run["failure_class"] == "wechat_failure"
 
 
 def test_funnel_classifies_material_shortage(tmp_path: Path):

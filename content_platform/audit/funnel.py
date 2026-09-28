@@ -70,18 +70,51 @@ def _list_len(payload: Any, key: str | None = None) -> int | None:
     return len(payload) if isinstance(payload, list) else None
 
 
+def _record_date(record: dict) -> str:
+    """Best-effort YYYY-MM-DD associated with a queue/ledger record."""
+    for key in ("enqueued_at", "finished_at", "date"):
+        value = str(record.get(key, "") or "")
+        if (
+            len(value) >= 10
+            and value[4] == "-"
+            and value[7] == "-"
+            and value[:4].isdigit()
+        ):
+            return value[:10]
+    return ""
+
+
 def _discover_dates(workspace_dir: Path) -> list[str]:
+    """Every date with any evidence: jobs, datasets, queue records or ledgers.
+
+    Dates that appear only in the publish queue (or only in a topic ledger) must
+    still be emitted; their upstream stages are then reported as unknown rather
+    than omitted or fabricated.
+    """
     dates: set[str] = set()
-    jobs_root = workspace_dir / "platform" / "jobs"
-    if jobs_root.is_dir():
-        for child in jobs_root.iterdir():
-            if child.is_dir() and len(child.name) == 10 and child.name[4] == "-":
-                dates.add(child.name)
-    datasets_root = workspace_dir / "platform" / "datasets"
-    if datasets_root.is_dir():
-        for child in datasets_root.iterdir():
-            if child.is_dir() and len(child.name) == 10 and child.name[4] == "-":
-                dates.add(child.name)
+    for root_key in ("jobs", "datasets"):
+        root = workspace_dir / "platform" / root_key
+        if root.is_dir():
+            for child in root.iterdir():
+                if child.is_dir() and len(child.name) == 10 and child.name[4] == "-":
+                    dates.add(child.name)
+
+    queue_dir = workspace_dir / "queue"
+    for filename in ("pending.jsonl", "processing.jsonl", "done.jsonl", "failed.jsonl"):
+        for record in _read_records(queue_dir / filename):
+            found = _record_date(record)
+            if found:
+                dates.add(found)
+
+    for ledger in ("_article_topics.json", "_case_topics.json", "_recent_topics.json"):
+        payload = _read_json(workspace_dir / "wechat-articles" / ledger) or []
+        if isinstance(payload, list):
+            for entry in payload:
+                if isinstance(entry, dict):
+                    found = _record_date(entry)
+                    if found:
+                        dates.add(found)
+
     return sorted(dates, reverse=True)
 
 
@@ -93,6 +126,29 @@ def _job_status(jobs_dir: Path, job_name: str) -> tuple[str | None, dict]:
     return job.get("status"), job
 
 
+def _queue_state(
+    pending_count: int,
+    processing_count: int,
+    done_count: int,
+    failed_count: int,
+) -> str:
+    """Queue outcome for a date, from real queue evidence.
+
+    ``failed`` means the publish worker moved a record to ``failed.jsonl``.
+    Pending/processing records are NOT failures — they are simply not yet
+    published.
+    """
+    if failed_count:
+        return "failed"
+    if processing_count:
+        return "processing"
+    if pending_count:
+        return "pending"
+    if done_count:
+        return "done"
+    return ""
+
+
 def _classify_article_failure(
     job: dict,
     collected: int | None,
@@ -100,8 +156,15 @@ def _classify_article_failure(
     selected: int | None,
     enqueued: int | None,
     drafts_done: int | None,
+    queue_state: str = "",
 ) -> str:
-    """Return a stable failure class for a date, or '' when none is evident."""
+    """Return a stable failure class for a date, or '' when none is evident.
+
+    ``wechat_failure`` is reported ONLY when a record actually landed in the
+    failed-publish state. A pending/processing record with no draft is
+    not-yet-published, and is surfaced via ``queue_state`` instead of being
+    mislabeled as a failure.
+    """
     if collected == 0 or (candidates == 0 and (collected is None or collected == 0)):
         return "material_shortage"
     if candidates == 0:
@@ -117,9 +180,7 @@ def _classify_article_failure(
             return "model_failure"
     if selected and enqueued == 0:
         return "enqueue_failure"
-    if enqueued and drafts_done == 0:
-        # A queued article whose publish ended in failed.jsonl is a WeChat error;
-        # a still-pending record is simply not yet published.
+    if queue_state == "failed":
         return "wechat_failure"
     return ""
 
@@ -152,12 +213,8 @@ def build_funnel(workspace_dir: Path, date_str: str | None = None) -> dict:
     return {"workspace_dir": str(workspace_dir), "runs": runs}
 
 
-def _enqueued_on(records: list[dict], date_str: str) -> list[dict]:
-    return [
-        record
-        for record in records
-        if str(record.get("enqueued_at", "")).startswith(date_str)
-    ]
+def _records_on(records: list[dict], date_str: str) -> list[dict]:
+    return [record for record in records if _record_date(record) == date_str]
 
 
 def _build_run(
@@ -220,25 +277,36 @@ def _build_run(
         str(workspace_dir / "wechat-articles" / "_article_topics.json")
     ] if article_topics else []
 
-    enqueued_records = _enqueued_on(queue_records["pending"], date_str)
-    enqueued_records += _enqueued_on(queue_records["processing"], date_str)
-    enqueued_records += _enqueued_on(queue_records["done"], date_str)
-    enqueued_records += _enqueued_on(queue_records["failed"], date_str)
-    enqueued = len(enqueued_records)
+    pending_records = _records_on(queue_records["pending"], date_str)
+    processing_records = _records_on(queue_records["processing"], date_str)
+    done_records = _records_on(queue_records["done"], date_str)
+    failed_records = _records_on(queue_records["failed"], date_str)
+    enqueued = (
+        len(pending_records)
+        + len(processing_records)
+        + len(done_records)
+        + len(failed_records)
+    )
     enqueued_evidence = [
         str(queue_dir_path)
         for queue_dir_path in (
             workspace_dir / "queue" / "pending.jsonl",
+            workspace_dir / "queue" / "processing.jsonl",
             workspace_dir / "queue" / "done.jsonl",
             workspace_dir / "queue" / "failed.jsonl",
         )
         if queue_dir_path.exists()
     ]
 
-    done_records = _enqueued_on(queue_records["done"], date_str)
     drafts_done = sum(1 for record in done_records if record.get("media_id"))
     drafts_done_evidence = (
-        [str(workspace_dir / "queue" / "done.jsonl")] if queue_records["done"] else []
+        [str(workspace_dir / "queue" / "done.jsonl")] if done_records else []
+    )
+    queue_state = _queue_state(
+        len(pending_records),
+        len(processing_records),
+        len(done_records),
+        len(failed_records),
     )
 
     stages = {
@@ -258,7 +326,7 @@ def _build_run(
     }
 
     failure_class = _classify_article_failure(
-        article_job, collected, candidates, selected, enqueued, drafts_done
+        article_job, collected, candidates, selected, enqueued, drafts_done, queue_state
     )
 
     return {
@@ -272,6 +340,7 @@ def _build_run(
         ],
         "stages": stages,
         "failure_class": failure_class,
+        "queue_state": queue_state,
         "evidence": {
             "jobs_dir": str(jobs_dir),
             "datasets_dir": str(datasets_dir),
@@ -283,11 +352,11 @@ def render_markdown(funnel: dict) -> str:
     lines = [f"# Pipeline funnel — {funnel['workspace_dir']}", ""]
     header = (
         "| date | collected | scored | candidates | selected | qualified | "
-        "enqueued | drafts | status | failure |"
+        "enqueued | drafts | queue | status | failure |"
     )
     lines.append(header)
     lines.append(
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |"
     )
     for run in funnel["runs"]:
         stages = run["stages"]
@@ -304,9 +373,10 @@ def render_markdown(funnel: dict) -> str:
             stage = stages[key]
             cells.append("unknown" if stage["count"] is None else str(stage["count"]))
         lines.append(
-            "| {date} | {cells} | {status} | {failure} |".format(
+            "| {date} | {cells} | {queue} | {status} | {failure} |".format(
                 date=run["date"],
                 cells=" | ".join(cells),
+                queue=run.get("queue_state") or "-",
                 status=run.get("article_status") or "unknown",
                 failure=run.get("failure_class") or "-",
             )
