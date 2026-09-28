@@ -426,8 +426,8 @@ def test_article_daily_persists_writer_logs_and_return_code(tmp_path: Path, monk
     assert result["artifacts"]["writer_returncode"] == 0
     assert Path(result["artifacts"]["writer_stdout_log"]).read_text(encoding="utf-8") == "writer ok"
     assert Path(result["artifacts"]["writer_stderr_log"]).read_text(encoding="utf-8") == "warning line"
-    assert (job_dir / "writer_stdout.log").exists()
-    assert (job_dir / "writer_stderr.log").exists()
+    assert (job_dir / "writer_1_stdout.log").exists()
+    assert (job_dir / "writer_1_stderr.log").exists()
 
 
 def test_case_daily_fails_when_writer_returns_non_zero_and_persists_logs(tmp_path: Path, monkeypatch):

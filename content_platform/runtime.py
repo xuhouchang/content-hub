@@ -410,56 +410,67 @@ def run_collect_daily(
     resolved_workspace = Path(workspace_dir or Path.cwd())
     paths = PlatformPaths.from_workspace(resolved_workspace)
     job_dir = paths.job_dir(date_str, "collect-daily")
-    store = JobStateStore(job_dir)
+    store = JobStateStore(job_dir, date_str=date_str)
 
     job = store.start_job(job_type="collect-daily", date_str=date_str)
-    raw_materials = materials
-    if raw_materials is None:
-        raw_materials = []
-        raw_materials.extend(load_rss_materials(date_str))
-        raw_materials.extend(load_reddit_materials(date_str))
-        raw_materials.extend(load_blog_materials(date_str))
-        raw_materials.extend(load_consulting_materials(date_str))
-        raw_materials.extend(load_case_materials(date_str))
-    curated_materials = _curate_materials(raw_materials, date_str=date_str, workspace_dir=workspace_dir)
-    article_pool = build_article_pool(curated_materials, topic_memory={"recent_outputs": []})
-    case_pool = build_case_pool(curated_materials, topic_memory={"recent_outputs": []})
+    job["artifacts"] = {}
+    status = "failed"
+    stage_reason = ""
+    try:
+        raw_materials = materials
+        if raw_materials is None:
+            raw_materials = []
+            raw_materials.extend(load_rss_materials(date_str))
+            raw_materials.extend(load_reddit_materials(date_str))
+            raw_materials.extend(load_blog_materials(date_str))
+            raw_materials.extend(load_consulting_materials(date_str))
+            raw_materials.extend(load_case_materials(date_str))
+        curated_materials = _curate_materials(raw_materials, date_str=date_str, workspace_dir=workspace_dir)
+        article_pool = build_article_pool(curated_materials, topic_memory={"recent_outputs": []})
+        case_pool = build_case_pool(curated_materials, topic_memory={"recent_outputs": []})
 
-    write_json(paths.ingest_raw_dir(date_str) / "materials.json", raw_materials)
-    write_json(paths.normalize_dir(date_str) / "materials.json", curated_materials)
-    write_json(paths.curate_dir(date_str) / "materials.json", curated_materials)
-    write_json(paths.datasets_dir(date_str) / "article_pool.json", article_pool)
-    write_json(paths.datasets_dir(date_str) / "case_pool.json", case_pool)
-    # Save curated cache for incremental scoring tomorrow
-    write_json(paths.datasets_dir(date_str) / "curated_cache.json", curated_materials)
-    
-    # Also merge into the global cross-day cache
-    # NOTE: no `exists()` guard here — _merge_into_global_cache handles a
-    # missing file (starts from an empty list). A guard would prevent the
-    # file from ever being created on the first run, breaking cross-day
-    # material accumulation entirely.
-    global_cache_file = paths.platform_dir / "datasets" / "curated_cache_all.json"
-    _merge_into_global_cache(global_cache_file, curated_materials)
+        write_json(paths.ingest_raw_dir(date_str) / "materials.json", raw_materials)
+        write_json(paths.normalize_dir(date_str) / "materials.json", curated_materials)
+        write_json(paths.curate_dir(date_str) / "materials.json", curated_materials)
+        write_json(paths.datasets_dir(date_str) / "article_pool.json", article_pool)
+        write_json(paths.datasets_dir(date_str) / "case_pool.json", case_pool)
+        # Save curated cache for incremental scoring tomorrow
+        write_json(paths.datasets_dir(date_str) / "curated_cache.json", curated_materials)
 
-    job["steps"] = [
-        {"name": "collect_sources", "status": "success"},
-        {"name": "normalize_materials", "status": "success"},
-        {"name": "curate_materials", "status": "success"},
-        {"name": "build_datasets", "status": "success"},
-    ]
-    job["status"] = "success"
-    job["artifacts"] = {
-        "ingest_file": str(paths.ingest_raw_dir(date_str) / "materials.json"),
-        "normalize_file": str(paths.normalize_dir(date_str) / "materials.json"),
-        "curate_file": str(paths.curate_dir(date_str) / "materials.json"),
-        "article_pool_file": str(paths.datasets_dir(date_str) / "article_pool.json"),
-        "case_pool_file": str(paths.datasets_dir(date_str) / "case_pool.json"),
-        "raw_material_count": len(raw_materials),
-        "curated_material_count": len(curated_materials),
-        "article_candidate_count": len(article_pool["candidates"]),
-        "case_candidate_count": len(case_pool["candidates"]),
-    }
-    store.write_job(job)
+        # Also merge into the global cross-day cache
+        # NOTE: no `exists()` guard here — _merge_into_global_cache handles a
+        # missing file (starts from an empty list). A guard would prevent the
+        # file from ever being created on the first run, breaking cross-day
+        # material accumulation entirely.
+        global_cache_file = paths.platform_dir / "datasets" / "curated_cache_all.json"
+        _merge_into_global_cache(global_cache_file, curated_materials)
+
+        job["steps"] = [
+            {"name": "collect_sources", "status": "success"},
+            {"name": "normalize_materials", "status": "success"},
+            {"name": "curate_materials", "status": "success"},
+            {"name": "build_datasets", "status": "success"},
+        ]
+        job["artifacts"] = {
+            "ingest_file": str(paths.ingest_raw_dir(date_str) / "materials.json"),
+            "normalize_file": str(paths.normalize_dir(date_str) / "materials.json"),
+            "curate_file": str(paths.curate_dir(date_str) / "materials.json"),
+            "article_pool_file": str(paths.datasets_dir(date_str) / "article_pool.json"),
+            "case_pool_file": str(paths.datasets_dir(date_str) / "case_pool.json"),
+            "raw_material_count": len(raw_materials),
+            "curated_material_count": len(curated_materials),
+            "article_candidate_count": len(article_pool["candidates"]),
+            "case_candidate_count": len(case_pool["candidates"]),
+        }
+        status = "success"
+    except Exception as exc:
+        status = "failed"
+        stage_reason = f"{type(exc).__name__}: {exc}"
+        job.setdefault("steps", []).append(
+            {"name": "exception", "status": "failed", "error": stage_reason}
+        )
+    finally:
+        _finalize_job(store, resolved_workspace, "collect-daily", job, status, stage_reason)
     return job
 
 
@@ -596,18 +607,48 @@ def _extract_output_dir(stdout: str) -> str | None:
     return None
 
 
-def _capture_writer_artifacts(job_dir: Path, result: subprocess.CompletedProcess) -> dict:
+def _capture_writer_artifacts(
+    job_dir: Path, result: subprocess.CompletedProcess, label: str = ""
+) -> dict:
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     artifacts = {
         "writer_returncode": result.returncode,
-        "writer_stdout_log": _write_job_log(job_dir, "writer_stdout.log", stdout),
-        "writer_stderr_log": _write_job_log(job_dir, "writer_stderr.log", stderr),
+        "writer_stdout_log": _write_job_log(job_dir, f"writer{label}_stdout.log", stdout),
+        "writer_stderr_log": _write_job_log(job_dir, f"writer{label}_stderr.log", stderr),
     }
     output_dir = _extract_output_dir(stdout)
     if output_dir:
         artifacts["writer_output_dir"] = output_dir
     return artifacts
+
+
+def _finalize_job(
+    store: JobStateStore,
+    workspace_dir: Path,
+    job_type: str,
+    job: dict,
+    status: str,
+    stage_reason: str,
+) -> dict:
+    """Record terminal state, reason, counts and health in one place.
+
+    Called from a ``finally`` block so every invocation (including one that
+    raised) leaves a readable run record with an explicit stage reason.
+    """
+    job.setdefault("artifacts", {})
+    job["artifacts"]["stage_reason"] = stage_reason
+    health = record_job_result(
+        workspace_dir,
+        job_type,
+        status,
+        reason=stage_reason,
+        run_id=job.get("run_id", ""),
+    )
+    job["artifacts"]["health"] = health
+    store.finalize(job, status, stage_reason)
+    return job
+
 
 
 def _persist_selected_content_hashes(mat_file: str, workspace_dir=None):
@@ -638,113 +679,116 @@ def run_article_daily(
     resolved_workspace = Path(workspace_dir or Path.cwd())
     paths = PlatformPaths.from_workspace(resolved_workspace)
     job_dir = paths.job_dir(date_str, "article-daily")
-    store = JobStateStore(job_dir)
+    store = JobStateStore(job_dir, date_str=date_str)
     input_materials = materials or _load_dataset_candidates(paths, date_str, "article_pool.json")
 
     job = store.start_job(job_type="article-daily", date_str=date_str)
-    result = run_daily_article_pipeline(
-        date_str=date_str,
-        workspace_dir=resolved_workspace,
-        materials=input_materials,
-        article_count=2,
-    )
-    job["steps"] = [
-        {"name": "build_article_pool", "status": "success" if result.get("candidates") else "failed"},
-        {"name": "select_primary_cluster", "status": "success" if result.get("selections") else "failed"},
-    ]
-    job["status"] = result.get("status", "failed")
+    job["artifacts"] = {"input_material_count": len(input_materials)}
+    status = "failed"
+    stage_reason = ""
+    try:
+        result = run_daily_article_pipeline(
+            date_str=date_str,
+            workspace_dir=resolved_workspace,
+            materials=input_materials,
+            article_count=2,
+        )
+        job["steps"] = [
+            {"name": "build_article_pool", "status": "success" if result.get("candidates") else "failed"},
+            {"name": "select_primary_cluster", "status": "success" if result.get("selections") else "failed"},
+        ]
 
-    writer_all_exit_codes: list[int] = []
-    writer_artifacts: dict = {}
+        writer_all_exit_codes: list[int] = []
+        writer_artifacts: dict = {}
 
-    # Write multiple articles (one per selected cluster)
-    materials_files = result.get("materials_files", [result.get("materials_file")] if result.get("materials_file") else [])
-    for i, mat_file in enumerate(materials_files):
-        if mat_file and Path(mat_file).exists():
-            print(f"\n── Article {i+1}/{len(materials_files)} from {mat_file} ──")
-            legacy_result = _invoke_legacy_writer(
-                resolved_workspace / "write_article.py",
-                date_str=date_str,
-                materials_file=mat_file,
-                extra_args=None,
+        # Write multiple articles (one per selected cluster)
+        materials_files = result.get("materials_files", [result.get("materials_file")] if result.get("materials_file") else [])
+        for i, mat_file in enumerate(materials_files):
+            if mat_file and Path(mat_file).exists():
+                print(f"\n── Article {i+1}/{len(materials_files)} from {mat_file} ──")
+                legacy_result = _invoke_legacy_writer(
+                    resolved_workspace / "write_article.py",
+                    date_str=date_str,
+                    materials_file=mat_file,
+                    extra_args=None,
+                )
+                # Persist content hashes only on a successful write, so the registry
+                # reflects *published* content. This is what lets a later-day reprint
+                # (different URL, same body) be deduped — without ever flagging this
+                # run's own freshly-collected material.
+                if legacy_result.returncode == 0:
+                    _persist_selected_content_hashes(mat_file, workspace_dir=resolved_workspace)
+                writer_all_exit_codes.append(legacy_result.returncode)
+                # M3: per-article logs, named by article index, so a second article
+                # never overwrites the first one's evidence.
+                captured = _capture_writer_artifacts(job_dir, legacy_result, label=f"_{i+1}")
+                writer_artifacts[f"writer_{i+1}_returncode"] = captured["writer_returncode"]
+                writer_artifacts[f"writer_{i+1}_stdout_log"] = captured["writer_stdout_log"]
+                writer_artifacts[f"writer_{i+1}_stderr_log"] = captured["writer_stderr_log"]
+                if i == 0:
+                    writer_artifacts.update(captured)
+            else:
+                writer_all_exit_codes.append(-1)
+
+        job["artifacts"].update({
+            "selection_file": result.get("selection_file"),
+            "materials_file": result.get("materials_file"),
+            "candidate_count": len(result.get("candidates", [])),
+            "selected_count": len(result.get("selections", [])),
+            "writer_exit_codes": writer_all_exit_codes,
+            "rejection_counts": result.get("rejection_counts", {}),
+            "semantic_model_available": result.get("model_available", True),
+        })
+        job["artifacts"].update(writer_artifacts)
+
+        # M2: status comes from qualified FINAL articles, not from raw exit codes.
+        # 2 qualified -> success, 1 -> partial, 0 -> failed. Each state carries the
+        # rejection-count breakdown and an explicit stage reason.
+        exit_code_labels = {0: "qualified", 2: "quality_rejected", 3: "commit_incomplete"}
+        rejection_counts = dict(result.get("rejection_counts", {}))
+        qualified = 0
+        for code in writer_all_exit_codes:
+            label = exit_code_labels.get(code, "model_failure")
+            if code == 0:
+                qualified += 1
+            else:
+                rejection_counts[label] = rejection_counts.get(label, 0) + 1
+        if qualified >= 2:
+            status = "success"
+        elif qualified == 1:
+            status = "partial"
+        else:
+            status = "failed"
+
+        if not result.get("candidates"):
+            stage_reason = (
+                f"no article candidates from {len(input_materials)} pool materials "
+                f"(rejections: {result.get('rejection_counts', {})})"
             )
-            # Persist content hashes only on a successful write, so the registry
-            # reflects *published* content. This is what lets a later-day reprint
-            # (different URL, same body) be deduped — without ever flagging this
-            # run's own freshly-collected material.
-            if legacy_result.returncode == 0:
-                _persist_selected_content_hashes(mat_file, workspace_dir=resolved_workspace)
-            writer_all_exit_codes.append(legacy_result.returncode)
-            captured = _capture_writer_artifacts(job_dir, legacy_result)
-            writer_artifacts[f"writer_{i+1}_returncode"] = captured["writer_returncode"]
-            writer_artifacts[f"writer_{i+1}_stdout_log"] = captured["writer_stdout_log"]
-            writer_artifacts[f"writer_{i+1}_stderr_log"] = captured["writer_stderr_log"]
-            if i == 0:
-                writer_artifacts.update(captured)
+        elif not result.get("selections"):
+            stage_reason = (
+                f"no selections after recent-topic filtering from "
+                f"{len(result.get('candidates', []))} candidates"
+            )
+        elif qualified == 0:
+            stage_reason = f"no qualified final drafts (exit codes: {writer_all_exit_codes})"
+        elif qualified == 1:
+            stage_reason = "only 1 qualified final draft; published as partial"
         else:
-            writer_all_exit_codes.append(-1)
+            stage_reason = ""
 
-    job["artifacts"] = {
-        "selection_file": result.get("selection_file"),
-        "materials_file": result.get("materials_file"),
-        "input_material_count": len(input_materials),
-        "candidate_count": len(result.get("candidates", [])),
-        "selected_count": len(result.get("selections", [])),
-        "writer_exit_codes": writer_all_exit_codes,
-        "rejection_counts": result.get("rejection_counts", {}),
-        "semantic_model_available": result.get("model_available", True),
-    }
-    job["artifacts"].update(writer_artifacts)
+        job["artifacts"]["qualified_count"] = qualified
+        job["artifacts"]["rejection_counts"] = rejection_counts
 
-    # M2: status comes from qualified FINAL articles, not from raw exit codes.
-    # 2 qualified -> success, 1 -> partial, 0 -> failed. Each state carries the
-    # rejection-count breakdown and an explicit stage reason.
-    exit_code_labels = {0: "qualified", 2: "quality_rejected", 3: "commit_incomplete"}
-    rejection_counts = dict(result.get("rejection_counts", {}))
-    qualified = 0
-    for code in writer_all_exit_codes:
-        label = exit_code_labels.get(code, "model_failure")
-        if code == 0:
-            qualified += 1
-        else:
-            rejection_counts[label] = rejection_counts.get(label, 0) + 1
-    if qualified >= 2:
-        job["status"] = "success"
-    elif qualified == 1:
-        job["status"] = "partial"
-    else:
-        job["status"] = "failed"
-
-    if not result.get("candidates"):
-        stage_reason = (
-            f"no article candidates from {len(input_materials)} pool materials "
-            f"(rejections: {result.get('rejection_counts', {})})"
+        job["steps"].append({"name": "write_articles", "status": "success" if qualified >= 2 else "failed"})
+    except Exception as exc:
+        status = "failed"
+        stage_reason = f"{type(exc).__name__}: {exc}"
+        job.setdefault("steps", []).append(
+            {"name": "exception", "status": "failed", "error": stage_reason}
         )
-    elif not result.get("selections"):
-        stage_reason = (
-            f"no selections after recent-topic filtering from "
-            f"{len(result.get('candidates', []))} candidates"
-        )
-    elif qualified == 0:
-        stage_reason = f"no qualified final drafts (exit codes: {writer_all_exit_codes})"
-    elif qualified == 1:
-        stage_reason = "only 1 qualified final draft; published as partial"
-    else:
-        stage_reason = ""
-
-    job["artifacts"]["qualified_count"] = qualified
-    job["artifacts"]["rejection_counts"] = rejection_counts
-    job["artifacts"]["stage_reason"] = stage_reason
-
-    job["steps"].append({"name": "write_articles", "status": "success" if qualified >= 2 else "failed"})
-    health = record_job_result(
-        resolved_workspace,
-        "article-daily",
-        job["status"],
-        reason=stage_reason,
-    )
-    job["artifacts"]["health"] = health
-    store.write_job(job)
+    finally:
+        _finalize_job(store, resolved_workspace, "article-daily", job, status, stage_reason)
     return job
 
 
@@ -756,54 +800,60 @@ def run_case_daily(
     resolved_workspace = Path(workspace_dir or Path.cwd())
     paths = PlatformPaths.from_workspace(resolved_workspace)
     job_dir = paths.job_dir(date_str, "case-daily")
-    store = JobStateStore(job_dir)
+    store = JobStateStore(job_dir, date_str=date_str)
     input_materials = materials or _load_dataset_candidates(paths, date_str, "case_pool.json")
 
     job = store.start_job(job_type="case-daily", date_str=date_str)
-    result = run_case_study_pipeline(
-        date_str=date_str,
-        workspace_dir=resolved_workspace,
-        materials=input_materials,
-    )
-    job["steps"] = [
-        {"name": "build_case_pool", "status": "success" if result.get("candidates") else "failed"},
-        {"name": "rank_case_candidates", "status": "success" if result.get("selected") else "failed"},
-    ]
-    job["status"] = result.get("status", "failed")
-    job["artifacts"] = {
-        "selection_file": result.get("selection_file"),
-        "materials_file": result.get("materials_file"),
-        "input_material_count": len(input_materials),
-        "candidate_count": len(result.get("candidates", [])),
-        "selected_count": 1 if result.get("selected") else 0,
-    }
-    if job["status"] == "success" and result.get("materials_file"):
-        legacy_result = _invoke_legacy_writer(
-            resolved_workspace / "decompose_case_study.py",
+    job["artifacts"] = {"input_material_count": len(input_materials)}
+    status = "failed"
+    stage_reason = ""
+    try:
+        result = run_case_study_pipeline(
             date_str=date_str,
-            materials_file=result["materials_file"],
+            workspace_dir=resolved_workspace,
+            materials=input_materials,
         )
-        job["artifacts"].update(_capture_writer_artifacts(job_dir, legacy_result))
-        if legacy_result.returncode != 0:
-            job["status"] = "failed"
-            job["steps"].append({"name": "write_case_study", "status": "failed"})
-        else:
-            job["steps"].append({"name": "write_case_study", "status": "success"})
-            # Mark the source used only after the case writer succeeds.
-            _persist_selected_content_hashes(result["materials_file"], workspace_dir=resolved_workspace)
-            record_case_recent_topic(
-                result["materials_file"],
-                workspace_dir=resolved_workspace,
-                out_dir=job["artifacts"].get("writer_output_dir"),
+        job["steps"] = [
+            {"name": "build_case_pool", "status": "success" if result.get("candidates") else "failed"},
+            {"name": "rank_case_candidates", "status": "success" if result.get("selected") else "failed"},
+        ]
+        status = result.get("status", "failed")
+        job["artifacts"].update({
+            "selection_file": result.get("selection_file"),
+            "materials_file": result.get("materials_file"),
+            "candidate_count": len(result.get("candidates", [])),
+            "selected_count": 1 if result.get("selected") else 0,
+        })
+        if status == "success" and result.get("materials_file"):
+            legacy_result = _invoke_legacy_writer(
+                resolved_workspace / "decompose_case_study.py",
+                date_str=date_str,
+                materials_file=result["materials_file"],
             )
-    health = record_job_result(
-        resolved_workspace,
-        "case-daily",
-        job["status"],
-        reason="case selection or writer failed" if job["status"] != "success" else "",
-    )
-    job["artifacts"]["health"] = health
-    store.write_job(job)
+            job["artifacts"].update(_capture_writer_artifacts(job_dir, legacy_result))
+            if legacy_result.returncode != 0:
+                status = "failed"
+                stage_reason = f"case writer exit code {legacy_result.returncode}"
+                job["steps"].append({"name": "write_case_study", "status": "failed"})
+            else:
+                job["steps"].append({"name": "write_case_study", "status": "success"})
+                # Mark the source used only after the case writer succeeds.
+                _persist_selected_content_hashes(result["materials_file"], workspace_dir=resolved_workspace)
+                record_case_recent_topic(
+                    result["materials_file"],
+                    workspace_dir=resolved_workspace,
+                    out_dir=job["artifacts"].get("writer_output_dir"),
+                )
+        elif status != "success":
+            stage_reason = "case selection failed"
+    except Exception as exc:
+        status = "failed"
+        stage_reason = f"{type(exc).__name__}: {exc}"
+        job.setdefault("steps", []).append(
+            {"name": "exception", "status": "failed", "error": stage_reason}
+        )
+    finally:
+        _finalize_job(store, resolved_workspace, "case-daily", job, status, stage_reason)
     return job
 
 
