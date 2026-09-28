@@ -51,7 +51,18 @@ def append_topic(workspace_dir: Path, kind: str, entry: dict) -> None:
             entries = _read_list(path)
             record = dict(entry)
             record["kind"] = kind
-            entries.append(record)
+            # Retryability: when the entry carries a stable article_id, replacing
+            # any existing record with the same id keeps the ledger idempotent.
+            article_id = str(record.get("article_id") or "")
+            if article_id:
+                for index, existing in enumerate(entries):
+                    if str(existing.get("article_id") or "") == article_id:
+                        entries[index] = record
+                        break
+                else:
+                    entries.append(record)
+            else:
+                entries.append(record)
             _write_list(path, entries)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)

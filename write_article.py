@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -750,6 +751,329 @@ def evaluate_article_quality(
     )
 
 
+# ── M1: final-draft acceptance, stable article ID and idempotent commit ──
+
+def normalize_source_url(url: str) -> str:
+    """Normalize a source URL for stable dedup/identity comparisons."""
+    return (url or "").strip().rstrip("/").lower()
+
+
+def derive_article_id(date_str: str, primary_source_url: str) -> str:
+    """Stable article ID from the date and the normalized primary source URL.
+
+    Retried runs for the same article therefore share one ID, which is what makes
+    topic-ledger, used-URL and queue writes idempotent.
+    """
+    normalized = normalize_source_url(primary_source_url)
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"{date_str}-{digest}"
+
+
+def primary_source_url(article_text: str, source_map: list | None) -> str:
+    """Return the first source URL referenced in the final article, else the map."""
+    text = (article_text or "").lower()
+    urls: list[str] = []
+    for sm in source_map or []:
+        if isinstance(sm, dict):
+            urls.extend(u for u in (sm.get("source_urls") or []) if u)
+    for url in urls:
+        if normalize_source_url(url) and normalize_source_url(url) in text:
+            return url
+    return urls[0] if urls else ""
+
+
+def check_final_traceability(article_text: str, source_map: list | None) -> dict:
+    """Require a locatable reference in the FINAL article body.
+
+    Material metadata URLs do not count: the final text must either contain a
+    source URL that is present in the source map, or an explicit source-location
+    marker (``来源：`` followed by text).
+    """
+    text = article_text or ""
+    text_lower = text.lower()
+    urls = [
+        u
+        for sm in (source_map or [])
+        if isinstance(sm, dict)
+        for u in (sm.get("source_urls") or [])
+        if u
+    ]
+    matched = next((u for u in urls if normalize_source_url(u) in text_lower), "")
+    marker = re.search(r"来源[:：]\s*\S", text)
+    if matched:
+        return {"ok": True, "matched_url": matched, "reason": "final body cites a source URL"}
+    if marker:
+        return {"ok": True, "matched_url": "", "reason": "final body has a 来源: source location"}
+    return {
+        "ok": False,
+        "matched_url": "",
+        "reason": "终稿正文中没有可定位的来源 URL 或来源位置（仅素材元数据不算可追溯）",
+    }
+
+
+def _quality_review_budget_state(workspace_dir: Path) -> Path:
+    return Path(workspace_dir) / "platform" / "state" / "quality_judge_budget.json"
+
+
+def consume_quality_review_budget(workspace_dir: Path, date_str: str) -> bool:
+    """Return True when one semantic review is still available for the date.
+
+    At most one review per final article (enforced by the single call site) and
+    at most ``QUALITY_LLM_JUDGE_DAILY_BUDGET`` (default 2) per daily target.
+    """
+    try:
+        budget = max(1, int(os.environ.get("QUALITY_LLM_JUDGE_DAILY_BUDGET", "2")))
+    except ValueError:
+        budget = 2
+    state_file = _quality_review_budget_state(workspace_dir)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = state_file.with_suffix(".lock")
+    import fcntl
+
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            try:
+                payload = json.loads(state_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            used = payload.get(date_str, 0)
+            if not isinstance(used, int):
+                used = 0
+            if used >= budget:
+                return False
+            payload[date_str] = used + 1
+            temp = state_file.with_suffix(".json.tmp")
+            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temp.replace(state_file)
+            return True
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def evaluate_final_draft(
+    article_text: str,
+    *,
+    title: str = "",
+    source_map: list | None = None,
+    blueprint_text: str = "",
+    date_str: str = "",
+    workspace_dir: Path | None = None,
+) -> dict:
+    """Acceptance for the cleaned, saved FINAL draft.
+
+    = rule gate + in-article source traceability + opt-in semantic review.
+    Semantic review is opt-in via ``QUALITY_LLM_JUDGE=1``; when enabled, at most
+    one review runs per final article and the daily budget is enforced. If it is
+    enabled but unavailable (or the budget is exhausted) the draft is rejected
+    with an explicit reason — never silently passed.
+    """
+    judge_enabled = os.environ.get("QUALITY_LLM_JUDGE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    workspace = Path(workspace_dir) if workspace_dir else WORKSPACE_DIR
+
+    quality = evaluate_article_quality(
+        article_text,
+        title=title,
+        source_map=source_map,
+        blueprint_text=blueprint_text,
+        enable_llm_judge=judge_enabled and consume_quality_review_budget(workspace, date_str),
+    )
+    traceability = check_final_traceability(article_text, source_map)
+    quality["traceability"] = traceability
+    if not traceability["ok"]:
+        quality["passed"] = False
+        quality.setdefault("reasons", []).append(traceability["reason"])
+
+    if judge_enabled and quality.get("status") == "rules":
+        # The judge was requested but no review ran (no budget left). Reject
+        # explicitly instead of passing on the rule layer alone.
+        quality["passed"] = False
+        quality["status"] = "unavailable"
+        quality.setdefault("reasons", []).append("语义复核已启用但当日预算已用尽，终稿按未通过处理")
+        quality.setdefault("warnings", []).append("semantic review skipped: daily budget exhausted")
+    return quality
+
+
+def _mark_used_urls(source_urls: list[str]) -> int:
+    """Mark source URLs as used in all_urls.tsv (idempotent). Returns matches."""
+    marked = 0
+    tsv_path = REPORTS_DIR / "_index" / "all_urls.tsv"
+    if not source_urls:
+        return 0
+    tsv_path.parent.mkdir(parents=True, exist_ok=True)
+    content = tsv_path.read_text(encoding="utf-8") if tsv_path.exists() else ""
+    for url in source_urls:
+        url_raw = url.strip()
+        pattern = re.compile(
+            r"^(" + re.escape(url_raw.rstrip("/")) + r"/?)\t(\S+)(\t.*)?$", re.MULTILINE
+        )
+        new_content, count = pattern.subn(
+            lambda m: m.group(1).rstrip("/") + "\tused" + (m.group(3) or ""), content
+        )
+        if count > 0:
+            content = new_content
+            marked += count
+        else:
+            today_str = datetime.datetime.now().astimezone().date().isoformat()
+            content += f"{url_raw.rstrip('/')}\tused\t{today_str}\n"
+            marked += 1
+    tsv_path.write_text(content, encoding="utf-8")
+    return marked
+
+
+def commit_final_article(
+    *,
+    output_dir: Path,
+    date_str: str,
+    title: str,
+    digest: str,
+    article_text: str,
+    source_map: list | None,
+    source_urls: list[str],
+    cluster_ids: list[str],
+    enqueue: bool = True,
+) -> dict:
+    """Record topic + used URLs + queue entry for an accepted final draft.
+
+    All three writes are keyed by the stable article ID so an interrupted commit
+    can be retried safely. Per-step status is persisted to meta.json; a failed
+    step is reported as incomplete, never as success.
+    """
+    article_id = derive_article_id(date_str, primary_source_url(article_text, source_map))
+    steps: dict[str, dict] = {}
+    errors: list[str] = []
+
+    try:
+        append_topic(
+            OUTPUT_BASE.parent,
+            "article",
+            {
+                "article_id": article_id,
+                "title": title,
+                "digest": digest,
+                "date": date_str,
+                "output_dir": str(output_dir),
+                "source_urls": source_urls[:5],
+                "cluster_ids": cluster_ids or [],
+            },
+        )
+        steps["topic"] = {"status": "success"}
+    except Exception as exc:  # pragma: no cover - exercised via monkeypatch in tests
+        steps["topic"] = {"status": "failed", "error": str(exc)[:300]}
+        errors.append(f"topic: {exc}")
+
+    try:
+        marked = _mark_used_urls(source_urls)
+        steps["urls"] = {"status": "success", "marked": marked}
+    except Exception as exc:  # pragma: no cover - exercised via monkeypatch in tests
+        steps["urls"] = {"status": "failed", "error": str(exc)[:300]}
+        errors.append(f"urls: {exc}")
+
+    if enqueue:
+        try:
+            from publish_queue import enqueue_for_publish as _enqueue
+
+            queued = _enqueue(str(output_dir), digest, article_id)
+            steps["queue"] = {"status": "success", "enqueued": bool(queued)}
+        except Exception as exc:  # pragma: no cover - exercised via monkeypatch in tests
+            steps["queue"] = {"status": "failed", "error": str(exc)[:300]}
+            errors.append(f"queue: {exc}")
+    else:
+        steps["queue"] = {"status": "skipped"}
+
+    committed = all(
+        step["status"] in ("success", "skipped") for step in steps.values()
+    )
+    result = {
+        "article_id": article_id,
+        "committed": committed,
+        "steps": steps,
+        "errors": errors,
+    }
+    _update_meta(output_dir, {"article_id": article_id, "commit": result})
+    return result
+
+
+def _run_polish_stage(article_path: Path, output_dir: Path) -> str:
+    """Run the polish step; return '' on success, else an explicit error string.
+
+    On failure the draft file is retained and an error report is written beside
+    it, so a human can repair the draft instead of losing it.
+    """
+    error = ""
+    if not POLISH_SCRIPT.exists():
+        error = f"polish_article.py not found at {POLISH_SCRIPT}"
+    else:
+        cmd = [
+            sys.executable,
+            str(POLISH_SCRIPT),
+            str(article_path),
+            "--model",
+            get_model("writing"),
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            for line in (result.stdout or "").strip().split("\n"):
+                print(f"  {line}")
+            if result.returncode != 0:
+                error = (
+                    f"polish_article.py exited {result.returncode}: "
+                    f"{(result.stderr or '')[:300]}"
+                )
+            elif not article_path.exists():
+                error = "final article.md missing after polish"
+            else:
+                return ""
+        except subprocess.TimeoutExpired:
+            error = "polish_article.py timed out (180s)"
+
+    print(f"  ❌ {error}")
+    try:
+        (Path(output_dir) / "polish_error.txt").write_text(error, encoding="utf-8")
+        _update_meta(Path(output_dir), {"status": "polish_failed", "polish_error": error})
+    except OSError as exc:
+        print(f"  ⚠️ could not write polish error report: {exc}")
+    return error
+
+
+def _print_quality_gate(quality: dict) -> None:
+    _qc = quality["checks"]
+    _qstatus = quality.get("status", "rules")
+    print(f"\n🔍 终稿质量闸门: {'✅ 通过' if quality['passed'] else '❌ 未通过'} "
+          f"(得分 {quality['score']}/8, 模式 {_qstatus})")
+    for k in ("has_thesis", "has_mechanism", "has_evidence", "has_counterpoint_or_boundary",
+              "has_source_traceability", "not_material_dump", "title_is_judgment", "no_empty_content"):
+        print(f"     {'✓' if _qc[k] else '✗'} {k}")
+    traceability = quality.get("traceability") or {}
+    print(f"     {'✓' if traceability.get('ok') else '✗'} final_body_source "
+          f"({traceability.get('reason', 'n/a')})")
+    if quality.get("llm") and _qstatus != "rules":
+        _llm = quality["llm"]
+        print(f"     [LLM语义评估] verdict={_llm.get('verdict')} "
+              f"overall={_llm.get('overall_score')}/5: {_llm.get('overall_reason')}")
+    for r in quality.get("reasons", []):
+        print(f"     ⚠️ {r}")
+
+
+def _update_meta(output_dir: Path, patch: dict) -> None:
+    meta_path = Path(output_dir) / "meta.json"
+    meta: dict = {}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            meta = {}
+    meta.update(patch)
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def extract_article_from_response(response: str) -> Optional[str]:
     """Extract the Markdown article from LLM response."""
     # Try to find Markdown with a heading
@@ -1052,6 +1376,7 @@ def write_article(
     max_materials: int = 5,
     model: str = None,
     materials_override: Optional[list[dict]] = None,
+    enqueue_draft: bool = True,
 ) -> Optional[str]:
     """
     Main article writing pipeline.
@@ -1425,30 +1750,7 @@ def write_article(
         article = f"# {title}\n\n{article}"
         response = article
 
-    # ══════════════════════════════════════════════════════════════
-    # 文章质量闸门（方案 4.5）— 不通过则保留为待修草稿，不入发布队列
-    # ══════════════════════════════════════════════════════════════
-    quality = evaluate_article_quality(
-        article,
-        title=title,
-        source_map=_safe_source_map(blueprint),
-        blueprint_text=json.dumps(blueprint, ensure_ascii=False) if isinstance(blueprint, dict) else "",
-    )
-    _qc = quality["checks"]
-    _qstatus = quality.get("status", "rules")
-    print(f"\n🔍 质量闸门: {'✅ 通过' if quality['passed'] else '❌ 未通过'} "
-          f"(得分 {quality['score']}/8, 模式 {_qstatus})")
-    for k in ("has_thesis", "has_mechanism", "has_evidence", "has_counterpoint_or_boundary",
-              "has_source_traceability", "not_material_dump", "title_is_judgment", "no_empty_content"):
-        print(f"     {'✓' if _qc[k] else '✗'} {k}")
-    if quality.get("llm") and _qstatus != "rules":
-        _llm = quality["llm"]
-        print(f"     [LLM语义评估] verdict={_llm.get('verdict')} "
-              f"overall={_llm.get('overall_score')}/5: {_llm.get('overall_reason')}")
-        for _d, _v in (quality["llm"].get("dimensions") or {}).items():
-            print(f"        · {_d}: {_v.get('score')}/5 — {_v.get('reason')}")
-    for r in quality["reasons"]:
-        print(f"     ⚠️ {r}")
+    # 质量闸门（方案 4.5）已移到润色后的终稿（M1），见下方 finalize 阶段。
 
     title_slug = slugify(title)
 
@@ -1479,78 +1781,30 @@ def write_article(
     else:
         print(f"  ⚠️ No digest extracted (LLM didn't output '摘要:' line)")
 
-    # ── Persist blueprint + raw response + quality gate (方案 4.3/4.5) ──
-    # These artifacts let a human/agent audit why this article was written and
-    # whether the gate rejected/approved it. Never deleted; no publish side-effect.
+    # ── Persist blueprint + raw response (audit) ──
+    # These artifacts let a human/agent audit why this article was written.
+    # Never deleted; no publish side-effect. The final quality decision is
+    # appended after polish (M1).
     try:
         bp_path = output_dir / "blueprint.json"
         bp_path.write_text(json.dumps(blueprint, ensure_ascii=False, indent=2), encoding="utf-8")
         raw_path = output_dir / "_blueprint_raw_response.txt"
         raw_path.write_text(bp_response or "", encoding="utf-8")
-        # Merge gate decision into meta.json (keeps digest too)
-        meta_path = output_dir / "meta.json"
-        meta = {}
-        if meta_path.exists():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                meta = {}
-        meta["quality"] = {
-            "passed": quality["passed"],
-            "score": quality["score"],
-            "checks": quality["checks"],
-            "reasons": quality["reasons"],
-            "warnings": quality["warnings"],
-        }
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        # Standalone gate report too
-        qr_path = output_dir / "quality_report.json"
-        qr_path.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"  📋 蓝图 + 质量报告已保存: {output_dir}")
     except Exception as _e:
-        print(f"  ⚠️ 保存蓝图/质量报告失败: {_e}")
-
-    # ── Log article topic for diversity tracking ──
-    # Collect cluster_ids from sampled materials for dedup tracking
-    sampled_cluster_ids = list({
-        s.get("dedup", {}).get("cluster_id", "")
-        for s in sampled
-        if s.get("dedup", {}).get("cluster_id")
-    })
-    if quality["passed"]:
-        _log_article_topic(
-            title,
-            digest,
-            output_dir,
-            [s["url"] for s in sampled],
-            cluster_ids=sampled_cluster_ids,
-            mark_source_urls=True,
-        )
-    else:
-        print("  ⚠️ Article failed quality gate; topic and source usage were not recorded")
+        print(f"  ⚠️ 保存蓝图失败: {_e}")
 
     # Step 6: Polish article through the configured DeepSeek API model.
-    # Done BEFORE image matching — text must be finalized first
+    # Done BEFORE image matching — text must be finalized first.
+    # M1: polish is part of writing. A non-zero exit, timeout, missing script or
+    # missing final file makes the writer fail; the draft and error report are
+    # retained for manual repair.
     t_polish_start = time.time()
     print("\n6️⃣  Polishing article...")
-    if POLISH_SCRIPT.exists():
-        cmd = [
-            sys.executable, str(POLISH_SCRIPT),
-            str(article_path),
-            "--model", get_model("writing"),
-        ]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-            for line in result.stdout.strip().split("\n"):
-                print(f"  {line}")
-            if result.returncode != 0:
-                print(f"  ⚠️ Polish script returned non-zero: {result.returncode}")
-                if result.stderr:
-                    print(f"  stderr: {result.stderr[:300]}")
-        except subprocess.TimeoutExpired:
-            print(f"  ⚠️ polish_article.py timed out (180s), continuing without polish")
-    else:
-        print(f"  ⚠️ polish_article.py not found, skipping polish")
+    polish_error = _run_polish_stage(article_path, output_dir)
+    if polish_error:
+        print(f"  ❌ Polish failed — writer failure: {polish_error}")
+        print(f"  📄 Draft retained for manual repair: {article_path}")
+        return None
 
     # Re-read article after polish
     article = article_path.read_text(encoding="utf-8")
@@ -1616,6 +1870,58 @@ def write_article(
 
     # Write cleaned article back
     article_path.write_text(article, encoding="utf-8")
+
+    # ── Final-draft acceptance on the cleaned, saved article.md (M1) ──
+    # Topic/URL/queue are only written if THIS final draft passes.
+    source_map = _safe_source_map(blueprint)
+    source_urls = [s["url"] for s in sampled if s.get("url")]
+    sampled_cluster_ids = list({
+        s.get("dedup", {}).get("cluster_id", "")
+        for s in sampled
+        if s.get("dedup", {}).get("cluster_id")
+    })
+    quality = evaluate_final_draft(
+        article,
+        title=title,
+        source_map=source_map,
+        blueprint_text=json.dumps(blueprint, ensure_ascii=False) if isinstance(blueprint, dict) else "",
+        date_str=date_str,
+    )
+    _print_quality_gate(quality)
+    _update_meta(output_dir, {
+        "quality": {
+            "passed": quality["passed"],
+            "score": quality["score"],
+            "checks": quality["checks"],
+            "status": quality.get("status", "rules"),
+            "traceability": quality.get("traceability"),
+            "reasons": quality["reasons"],
+            "warnings": quality["warnings"],
+        }
+    })
+    (output_dir / "quality_report.json").write_text(
+        json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    if quality["passed"]:
+        commit_result = commit_final_article(
+            output_dir=output_dir,
+            date_str=date_str,
+            title=title,
+            digest=digest,
+            article_text=article,
+            source_map=source_map,
+            source_urls=source_urls,
+            cluster_ids=sampled_cluster_ids,
+            enqueue=enqueue_draft,
+        )
+        status = "committed" if commit_result["committed"] else "commit_incomplete"
+        _update_meta(output_dir, {"status": status})
+        if not commit_result["committed"]:
+            print(f"  ⚠️ 终稿提交未完成，不可视为成功: {commit_result['errors']}")
+    else:
+        _update_meta(output_dir, {"status": "quality_rejected"})
+        print("  ⚠️ 终稿未通过质量闸门；未记录主题/已用来源，未入队（草稿保留）")
 
     # Step 7: Match images (after text is finalized)
     t_img_start = time.time()
@@ -1763,41 +2069,47 @@ def main():
         else:
             print(f"  ⚠️ Materials file not found: {mp}")
 
-    output_dir = write_article(date_str, dry_run=args.dry_run, max_materials=args.max_materials, model=args.model, materials_override=materials_override)
+    output_dir = write_article(
+        date_str,
+        dry_run=args.dry_run,
+        max_materials=args.max_materials,
+        model=args.model,
+        materials_override=materials_override,
+        enqueue_draft=not args.no_publish and not args.dry_run,
+    )
 
     if output_dir:
         exit_code = 0
         article_status = "generated"
-        # Stage A ends at the queue boundary. An independently scheduled worker
-        # consumes the record and creates a WeChat draft; the writer never
-        # starts or waits for the sender.
-        if not args.no_publish and not args.dry_run:
-            digest = ""
-            quality_passed = True
-            meta_path = Path(output_dir) / "meta.json"
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    digest = meta.get("digest", "")
-                    q = meta.get("quality") or {}
-                    quality_passed = bool(q.get("passed", True))
-                except (json.JSONDecodeError, OSError):
-                    pass
-            # ⛔ 质量闸门（方案 4.5）：未通过的文章不自动进入发布队列。
-            if not quality_passed:
-                print("  ⛔ 质量闸门未通过 — 不进入发布队列，文章已作为待修草稿保留")
-                print(f"     Output preserved (待人工审核/补素材): {output_dir}")
-                article_status = "quality_rejected"
-                exit_code = 2
-            elif enqueue_for_publish(output_dir, digest):
+        meta = {}
+        meta_path = Path(output_dir) / "meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                meta = {}
+        quality_passed = bool((meta.get("quality") or {}).get("passed", False))
+        commit = meta.get("commit") or {}
+        committed = bool(commit.get("committed", False))
+
+        if args.dry_run:
+            article_status = "dry_run"
+        elif not quality_passed:
+            # ⛔ Final-draft gate: rejected drafts are retained, never enqueued.
+            print("  ⛔ 终稿质量闸门未通过 — 不进入发布队列，文章已作为待修草稿保留")
+            print(f"     Output preserved (待人工审核/补素材): {output_dir}")
+            article_status = "quality_rejected"
+            exit_code = 2
+        elif not args.no_publish:
+            # write_article committed topic/URL/queue after acceptance.
+            if committed:
+                article_status = "queued"
                 print(f"  📋 Queued for async publish (draft): {QUEUE_DIR / 'pending.jsonl'}")
                 print("  ⏳ Independent publish worker will consume the queue")
-                article_status = "queued"
             else:
-                # False means the idempotency guard found this output in a
-                # queue state already; it is not a second-enqueue failure.
-                print("  ↺ Already queued or resolved; duplicate enqueue skipped")
-                article_status = "already_queued_or_resolved"
+                article_status = "commit_incomplete"
+                exit_code = 3
+                print(f"  ⚠️ 终稿提交未完成，按失败处理: {commit.get('errors')}")
 
         print(f"\n{'='*60}")
         print(f"✅ Article pipeline complete!")

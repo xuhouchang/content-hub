@@ -63,30 +63,38 @@ def append_record_unlocked(path: Path, record: dict) -> None:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def enqueue_for_publish(output_dir: str, digest: str = "") -> bool:
-    """Add one article idempotently without racing a running worker."""
+def enqueue_for_publish(output_dir: str, digest: str = "", article_id: str = "") -> bool:
+    """Add one article idempotently without racing a running worker.
+
+    Dedup checks the normalized output directory and, when provided, the stable
+    ``article_id`` across pending, processing, done and failed states. This makes
+    a retried commit after an interrupted write safe.
+    """
     normalized_dir = str(Path(output_dir).resolve())
+    normalized_id = str(article_id or "")
     with queue_lock():
         for path in (PENDING, PROCESSING, DONE, FAILED):
-            if any(
-                str(Path(record.get("output_dir", "")).resolve()) == normalized_dir
-                for record in read_records_unlocked(path)
-                if record.get("output_dir")
-            ):
-                print(f"  ↺ Already queued/resolved ({path.name}); skip enqueue")
-                return False
+            for record in read_records_unlocked(path):
+                if record.get("output_dir") and str(
+                    Path(record["output_dir"]).resolve()
+                ) == normalized_dir:
+                    print(f"  ↺ Already queued/resolved ({path.name}); skip enqueue")
+                    return False
+                if normalized_id and str(record.get("article_id") or "") == normalized_id:
+                    print(f"  ↺ Already queued/resolved by article_id ({path.name}); skip enqueue")
+                    return False
 
-        append_record_unlocked(
-            PENDING,
-            {
-                "output_dir": normalized_dir,
-                "article": "article.md",
-                "images_dir": "images",
-                "digest": digest,
-                "attempts": 0,
-                "enqueued_at": datetime.datetime.now()
-                .astimezone()
-                .isoformat(timespec="seconds"),
-            },
-        )
+        record = {
+            "output_dir": normalized_dir,
+            "article": "article.md",
+            "images_dir": "images",
+            "digest": digest,
+            "attempts": 0,
+            "enqueued_at": datetime.datetime.now()
+            .astimezone()
+            .isoformat(timespec="seconds"),
+        }
+        if normalized_id:
+            record["article_id"] = normalized_id
+        append_record_unlocked(PENDING, record)
     return True
