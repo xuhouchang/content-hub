@@ -103,3 +103,31 @@ M0 + M1 **通过独立复验，无阻断项**。仍需人工处理：VerifyKit a
 5. **M4 内容哈希去重未在选择边界生效**：选择阶段只查 source URL（`case pipeline:19`），content hash 仅在 curate 阶段使用（`runtime.py:337`）。Reviewer 复现：一个案例成功后，仍选中了 URL 不同但 `content_hash` 相同的文章。
 
 **说明**：Step 0 判定 MET（缺图时 `image_search.py` 明确报错退出，非静默）；新增 3 处 `BLE001` 捕获会真实记录终态，不是静默吞错。
+
+## Round 2 — 修复轮（Executor）
+
+提交：`54bce17`（fix(M2)，含 `WORKFLOW-ITERATIONS.md`）、`a548a5f`（fix(M3)）、`2df5cf6`（fix(M4)）。
+
+- **M2**：`_llm_rank_executive_value` 返回 `{url: {score, reason}}`；**无理由的分数只记录、不允许改变排序**。每个决策记录含 `evidence_rank` 与 `executive{score, reason, applied}`，完整 `executive_ranking` 持久化到 `article_selection.json`。
+- **M3**：新增 `JobStateStore.run_dir`，文章/案例 writer 日志写入 `runs/<run_id>/`，`job.json` 保留为最新兼容视图。告警状态持久化有界 `processed_run_ids` 集合，任何已处理运行 ID 无论顺序均完全幂等。
+- **M4**：新增 `normalized_url_key()`（仓库 `normalize_url` + 小写）用于全部跨类型来源 URL 比较；新增 `content_platform/dedup.py::content_hash_seen()` 并**下沉到两个 pool 的选择边界**，直接传入素材同样覆盖，淘汰时记录 `recent_content_hash`。
+- 证据：`pytest -q tests` = **171 passed**（164→166→168→171）；改动文件无新增 ruff 错误；`queue/pending.jsonl` md5 `0900ce0ab0fed4ee2e003a797e760a1a` 且 11 条；工作区干净；`verifykit check` exit 0（46 文件，3 规则）。
+
+## Round 2 — Reviewer 第 2 次验收（全新 Reviewer，修复复验）
+
+**结论：PASS，零阻断问题。**
+
+- 5 项原阻断全部判定 **FIXED**，且均由 Reviewer **亲自复现**：
+  - 强制让低证据候选因主编分数胜出 → 决策记录含 `evidence_rank: 1`、score `9.5`、理由、`applied: true` 与 `executive_ranking`；空理由无法覆盖高证据候选。
+  - 同日跑两次文章与案例 → 四个日志都留在各自 `runs/<run_id>/`，首次日志未被覆盖。
+  - 告警序列实测 `1 → 2 → 2 → 3`（旧失败、新失败、重放旧运行、真正新失败）。
+  - `?utm_source`/fragment 与干净 URL 在文章/案例双向被拒。
+  - 同哈希不同 URL 在两个 pool 及直接 runtime 输入均被拒（`recent_content_hash`，写作者执行前即失败）。
+- 新测试非空（在 `b5e5fc5` 上会失败）。
+- 未发现 M5 越界或密钥暴露；`git status` 干净、`git diff --check` 干净。
+- VerifyKit Run `run_20260928101703_61dcdb43` = FAIL（**仅**因 ground truth 未人工批准）；3/3 步 executed、0 skipped、REAL、mock 0、unexpected fallback 0。
+- **optional（未实施）**：告警去重只保留最近 50 个已处理运行 ID；第 51 次之后重放被淘汰的 ID 会使计数 `51 → 52`。这是有界状态的刻意设计（避免状态无限增长），"任意历史运行 ID 幂等"仅在保留窗口内成立。
+
+## Round 2 状态
+
+**M2 + M3 + M4 通过最新一次独立复验，无阻断项。** 待办：VerifyKit acceptance/ground truth 的 `approved:true` 由人工决定；外部告警渠道待人工提供接收人与凭据；M5 未实施（第 3 轮）。
