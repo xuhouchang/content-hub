@@ -137,7 +137,8 @@ IMPORTANT: Only output the JSON array, nothing else."""
 
     try:
         from lib.llm import call_model
-        response = call_model(messages, temperature=0.3, max_tokens=2048, model="deepseek-v4-flash")
+        from lib.models import get_model
+        response = call_model(messages, temperature=0.3, max_tokens=2048, model=get_model("topic"))
         if not response:
             return None
         start = response.find("[")
@@ -477,12 +478,63 @@ def _load_dataset_candidates(
     paths: PlatformPaths,
     date_str: str,
     dataset_name: str,
+    cross_day: bool = True,
+    max_days: int = 14,
 ) -> list[dict]:
-    dataset_file = paths.datasets_dir(date_str) / dataset_name
-    if not dataset_file.exists():
-        return []
-    payload = read_json(dataset_file)
-    return payload.get("candidates", [])
+    """Load candidate materials for a dataset.
+
+    By default (`cross_day=True`) this merges candidate pools across all
+    existing day directories up to and including `date_str`, newest-first, so
+    an article-daily run can select material that was collected/curated on a
+    previous day instead of being limited to the pools just written for that
+    single day. Dedup against recently-published material is still enforced
+    downstream by ``build_article_pool`` (recent cluster_ids + content-hash
+    registry). Set ``cross_day=False`` to restore the strict single-day lookup.
+    """
+    datasets_root = paths.datasets_dir(date_str).parent
+    # Collect day dirs <= date_str, newest first (today's pool takes priority).
+    day_dirs = []
+    if cross_day and datasets_root.is_dir():
+        for child in datasets_root.iterdir():
+            if not child.is_dir():
+                continue
+            ds = child.name
+            if _is_date_dir(ds) and ds <= date_str:
+                day_dirs.append(child)
+        day_dirs.sort(key=lambda d: d.name, reverse=True)
+        if max_days > 0:
+            day_dirs = day_dirs[:max_days]
+    if not day_dirs:
+        day_dirs = [paths.datasets_dir(date_str)]
+
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for dd in day_dirs:
+        f = dd / dataset_name
+        if not f.exists():
+            continue
+        payload = read_json(f)
+        candidates = payload.get("candidates", []) or []
+        for c in candidates:
+            key = _candidate_key(c)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(c)
+    return merged
+
+
+def _candidate_key(c: dict) -> str:
+    """:return: stable dedup key for a candidate material across pools."""
+    return (
+        c.get("canonical_url") or c.get("url") or c.get("normalized_url") or c.get("title", "")
+    ).strip()
+
+
+def _is_date_dir(s: str) -> bool:
+    """Return True if ``s`` looks like a YYYY-MM-DD day directory."""
+    import re as _re
+    return bool(_re.fullmatch(r"\d{4}-\d{2}-\d{2}", s))
 
 
 def _invoke_legacy_writer(script_path: Path, date_str: str, materials_file: str, extra_args: list[str] | None = None) -> subprocess.CompletedProcess:

@@ -329,11 +329,14 @@ def call_model(
     model = model or DEFAULT_WRITING_MODEL
 
     # ── 固化模型路由规则（不依赖 Skills / agent prompt）──
-    # 写作 & 润色（openai/gpt 系）：走 OpenRouter；失败后 fallback DeepSeek 直连
+    # 强模型（openai/gpt 系、google/gemini 系）→ 走 OpenRouter；失败后 fallback DeepSeek 直连
     # DeepSeek 系模型（deepseek/deepseek-v4-flash 等）：只走 DeepSeek 直连（便宜）
+    # 2016-08 修正：google/gemini-* 之前误落入 else 分支被硬编码成 DeepSeek 直连，
+    # 导致配置为 Gemini 3.7 Flash 的实际请求全都打到了 deepseek-v4-flash。
+    # 现在 Gemini 等 OpenRouter 托管的强模型走 OpenRouter，真正命中 Gemini。
     # ─────────────────────────────────────────
-    if model and ("openai" in model or "gpt" in model):
-        # GPT 模型 → 走 OpenRouter
+    if model and (_is_openrouter_strong_model(model)):
+        # GPT / Gemini 系列 → 走 OpenRouter
         result = call_openrouter(messages, model=model, temperature=temperature, max_tokens=max_tokens, deadline=deadline)
         if result and result.strip():
             return result
@@ -345,3 +348,16 @@ def call_model(
     # Defensive: never leak an empty/whitespace string upstream — callers must
     # be able to rely on `if not result` and on result.strip() being safe.
     return result if (result and result.strip()) else None
+
+
+def _is_openrouter_strong_model(model: str) -> bool:
+    """Return True if ``model`` should be routed through OpenRouter.
+
+    Strong writing/polish/topic models (OpenAI GPT, Google Gemini) are hosted
+    by OpenRouter; cheap/models available on DeepSeek direct stay on DeepSeek.
+    """
+    model_l = (model or "").lower()
+    return (
+        "openai/" in model_l or "gpt" in model_l
+        or "google/" in model_l or "gemini" in model_l
+    )

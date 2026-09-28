@@ -27,8 +27,11 @@ Design notes
 
 from __future__ import annotations
 
+import json
 import os
+import random
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -51,6 +54,58 @@ ALLOWED_OUTPUT_TYPES = {".jpg", ".jpeg", ".png", ".webp"}
 
 # Default target long edge (px) applied during post-process.
 DEFAULT_LONG_EDGE = 1280
+
+# ── Persistent "used image" ledger ──────────────────────────────────────────
+# Records Pexels photo IDs already used in previous articles so new article
+# body illustrations avoid re-picking the same top-1 stock photos (the cause of
+# heavy duplication across wechat-articles history). Stored as run data in the
+# workspace alongside other wechat-articles _-prefixed files — NOT in secrets.
+# Env override: PEXELS_USED_LEDGER=/abs/path to relocate (e.g. tmp for tests).
+_DEFAULT_LEDGER = str(
+    Path(__file__).resolve().parent.parent / "wechat-articles" / "_used_pexels_photo_ids.json"
+)
+USED_LEDGER_PATH = Path(os.environ.get("PEXELS_USED_LEDGER", _DEFAULT_LEDGER))
+
+
+def load_used_photo_ids() -> set[str]:
+    """Return the set of Pexels photo IDs recorded as already used.
+
+    Missing/empty ledger -> empty set. Never raises.
+    """
+    try:
+        if not USED_LEDGER_PATH.exists():
+            return set()
+        data = json.loads(USED_LEDGER_PATH.read_text(encoding="utf-8"))
+        ids = data.get("photo_ids", []) if isinstance(data, dict) else []
+        return {str(x) for x in ids}
+    except Exception:
+        return set()
+
+
+def record_used_photo_id(photo_id: str | None) -> None:
+    """Persist one newly-used Pexels photo ID into the ledger (best-effort).
+
+    Descends the file atomically via a temp file + rename. Missing parent dirs
+    are created. Absent photo_id is a no-op.
+    """
+    if not photo_id:
+        return
+    try:
+        USED_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ids = load_used_photo_ids()
+        ids.add(str(photo_id))
+        payload = {
+            "photo_ids": sorted(ids),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        tmp = USED_LEDGER_PATH.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(USED_LEDGER_PATH)
+    except Exception as e:  # never let ledger bookkeeping break image acquisition
+        print(f"    ⚠️ used-image ledger record failed: {e}")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -154,17 +209,20 @@ def _postprocess(
 class PexelsResult:
     """Result of a resolve_* call."""
 
-    __slots__ = ("ok", "path", "source", "reason", "query")
+    __slots__ = ("ok", "path", "source", "reason", "query", "photo_id")
 
-    def __init__(self, ok: bool, path: Optional[Path], source: str, reason: str, query: str = ""):
+    def __init__(self, ok: bool, path: Optional[Path], source: str, reason: str,
+                 query: str = "", photo_id: Optional[str] = None):
         self.ok = ok            # True → a usable image file now exists at `path`
         self.path = path        # final file path (None when not written)
         self.source = source    # "existing" | "pexels" | "generative" | "placeholder" | "none"
         self.reason = reason    # human-readable explanation
         self.query = query      # the Pexels query actually used ("" if none)
+        self.photo_id = photo_id  # chosen Pexels photo ID ("" / None if unknown)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"<PexelsResult ok={self.ok} source={self.source} path={self.path} reason={self.reason!r} query={self.query!r}>"
+        return (f"<PexelsResult ok={self.ok} source={self.source} path={self.path} "
+                f"reason={self.reason!r} query={self.query!r} photo_id={self.photo_id!r}>")
 
 
 def resolve_image(
@@ -180,6 +238,9 @@ def resolve_image(
     long_edge: Optional[int] = DEFAULT_LONG_EDGE,
     per_page: int = 5,
     min_width: int = 800,
+    exclude_ids: Optional[set[str] | frozenset[str]] = None,
+    random_page: bool = True,
+    persist_used: bool = True,
 ) -> PexelsResult:
     """Resolve a body illustration for `out_path` with a Pexels-first policy.
 
@@ -206,6 +267,13 @@ def resolve_image(
         long_edge:     post-process target long edge (px). None disables resize.
         per_page:      Pexels page size for the search.
         min_width:     minimum source width (px) to accept a Pexels photo.
+        exclude_ids:   Pexels photo IDs to never choose (e.g. IDs already used
+                       earlier in the SAME article). These are merged with the
+                       persistent history ledger before searching.
+        random_page:   when True, hit a random Pexels page so the same query
+                       returns different photos over time (default True).
+        persist_used:  when True, write the chosen photo ID into the persistent
+                       history ledger (default True). Disable to run dry / tests.
     """
     out_path = Path(out_path)
     if output_dir is not None:
@@ -221,17 +289,24 @@ def resolve_image(
     # 2) Pexels first.
     if prefer_pexels:
         q = query or (_build_query(description, filename_hint))
-        best = _search_download(out_path, q, per_page=per_page, min_width=min_width)
+        best, pid = _search_download(
+            out_path, q,
+            per_page=per_page,
+            min_width=min_width,
+            exclude_ids=exclude_ids,
+            random_page=random_page,
+            persist_used=persist_used,
+        )
         if best:
             if long_edge:
                 try:
                     final = _postprocess(best, out_path, long_edge=long_edge)
                     return PexelsResult(True, final, "pexels",
-                                        "downloaded from Pexels and normalized", q)
+                                        "downloaded from Pexels and normalized", q, pid)
                 except Exception as e:  # keep the raw download if normalize fails
                     return PexelsResult(True, best, "pexels",
-                                        f"downloaded from Pexels (normalize skipped: {e})", q)
-            return PexelsResult(True, best, "pexels", "downloaded from Pexels", q)
+                                        f"downloaded from Pexels (normalize skipped: {e})", q, pid)
+            return PexelsResult(True, best, "pexels", "downloaded from Pexels", q, pid)
 
     # 3) Generative fallback only if explicitly allowed.
     allow_generative = (not prefer_pexels) if allow_generative is None else bool(allow_generative)
@@ -282,68 +357,150 @@ def _build_query(description: str, filename_hint: str = "") -> str:
     return kws[0] if kws else "enterprise business technology"
 
 
+def _photo_id_from_result(pick: dict, source: str) -> Optional[str]:
+    """Best-effort Pexels photo ID from a chosen search result dict."""
+    if source != "pexels":
+        return None
+    pid = pick.get("id")
+    if pid is not None:
+        return str(pid)
+    # image_search.search_pexels already normalizes `id`; tolerate a src.id too.
+    sid = (pick.get("src") or {}).get("id")
+    if sid is not None:
+        return str(sid)
+    return None
+
+
 def _search_download(
     out_path: Path,
     query: str,
     *,
     per_page: int = 5,
     min_width: int = 800,
-) -> Optional[Path]:
-    """Search Pexels and download the best landscape photo to `out_path`.
+    exclude_ids: Optional[set[str] | frozenset[str]] = None,
+    random_page: bool = True,
+    persist_used: bool = True,
+) -> Optional[tuple]:
+    """Search Pexels and download a photo to `out_path`, avoiding repeats.
 
-    Returns the downloaded file path on success, else None. Does NOT post-process.
-    Uses image_search.search_pexels + download_image, so API keys and download
-    guards (content-type, size, extension resolution) are centralized.
+    Dedup / variety behavior:
+      * The persistent history ledger (already-used Pexels photo IDs) is merged
+        with the caller's transient ``exclude_ids`` (e.g. IDs already planted in
+        the CURRENT article). Both are passed to search_pexels for client-side
+        filtering and also used here for the pick.
+      * When ``random_page`` is on, candidate pages are sampled; if every photo
+        in a sampled page is already-used/excluded, up to a few more distinct
+        random/adjacent pages are tried before falling back to minimal reuse.
+      * Minimal fallback: if nothing fresh is available, allow reuse of an
+        already-used photo rather than returning nothing (keeps articles
+        rendering even when a query is exhaustively re-used).
+      * On a successful new download the chosen photo ID is appended to the
+        ledger (when ``persist_used``).
+
+    Returns a ``(path, photo_id)`` tuple on success (photo_id may be None if
+    the chosen photo has no recognizable ID), else ``(None, None)``.
     """
-    try:
-        results = search_pexels(query, per_page=per_page) or []
-    except Exception as e:
-        print(f"    ⚠️ Pexels search error for '{query}': {e}")
-        return None
+    exclude = set(exclude_ids or ())
+    if persist_used:
+        exclude |= load_used_photo_ids()
 
-    pick = None
-    for r in results:
-        w = r.get("width") or 0
-        if w >= min_width:
-            pick = r
-            break
-    if pick is None and results:
-        pick = results[0]
+    last_error = None
+    max_retries = 3
+    tried_pages = set()
+    for attempt in range(max_retries):
+        page = random.randint(1, 6) if random_page else (attempt + 1)
+        offset = 0
+        while page in tried_pages and offset < 6:
+            page = ((page + 1) % 6) + 1
+            offset += 1
+        tried_pages.add(page)
 
-    if pick is None:
-        print(f"    ⚠️ No Pexels result for '{query}'")
-        return None
+        try:
+            results = search_pexels(
+                query,
+                per_page=per_page,
+                page=page,
+                exclude_ids=exclude,
+            ) or []
+        except Exception as e:
+            last_error = e
+            print(f"    ⚠️ Pexels search error for '{query}': {e}")
+            return (None, None)
 
-    if "src" in pick:
-        url = (pick["src"].get("large2x") or pick["src"].get("large")
-               or pick["src"].get("medium") or pick["src"].get("original"))
-        source = "pexels"
-    elif "webformatURL" in pick:
-        url = pick.get("webformatURL") or pick.get("largeImageURL")
-        source = "pixabay"
-    else:
-        url = None
-        source = "unknown"
+        pick = None
+        for r in results:
+            w = r.get("width") or 0
+            if w >= min_width:
+                pick = r
+                break
+        if pick is None and results:
+            pick = results[0]
 
-    if not url:
-        print(f"    ⚠️ No image URL in result for '{query}'")
-        return None
+        if pick is None:
+            print(f"    ⚠️ Pexels page {page} for '{query}' all used/skip; retrying")
+            continue
 
-    # Resolve final extension before download so idempotency/file-checks align.
-    final_out = out_path
-    pure = Path(final_out)
-    if pure.suffix.lower() not in ALLOWED_OUTPUT_TYPES:
-        pure = pure.with_suffix(".jpg")
+        if "src" in pick:
+            url = (pick["src"].get("large2x") or pick["src"].get("large")
+                   or pick["src"].get("medium") or pick["src"].get("original"))
+            source = "pexels"
+        elif "webformatURL" in pick:
+            url = pick.get("webformatURL") or pick.get("largeImageURL")
+            source = "pixabay"
+        else:
+            url = None
+            source = "unknown"
 
-    if _pexels_download(url, pure):
-        # image_search.download_image overrides the suffix with the URL-derived
-        # extension (e.g. .jpeg for a JPEG source), so the actual file may not be
-        # `pure`. Resolve the real file by same-stem glob to avoid returning a
-        # path that doesn't exist.
-        actual = _resolve_downloaded(pure)
-        return actual if actual else pure
-    return None
+        if not url:
+            print(f"    ⚠️ No image URL in result for '{query}'")
+            return (None, None)
 
+        pure = Path(out_path)
+        if pure.suffix.lower() not in ALLOWED_OUTPUT_TYPES:
+            pure = pure.with_suffix(".jpg")
+
+        if _pexels_download(url, pure):
+            actual = _resolve_downloaded(pure)
+            pid = _photo_id_from_result(pick, source)
+            if persist_used:
+                record_used_photo_id(pid)
+            return (actual if actual else pure, pid)
+        print(f"    ⚠️ Pexels download failed for '{query}' (attempt {attempt+1}); retrying")
+
+    # Minimal fallback: candidate reuse of an already-used photo so the article
+    # still renders (one extra, exclusion-free random page).
+    if last_error is None:
+        try:
+            results = search_pexels(query, per_page=per_page) or []
+        except Exception as e:
+            print(f"    ⚠️ Pexels search error (fallback) for '{query}': {e}")
+            return (None, None)
+        if results:
+            pick = results[0]
+            if "src" in pick:
+                url = (pick["src"].get("large2x") or pick["src"].get("large")
+                       or pick["src"].get("medium") or pick["src"].get("original"))
+                source = "pexels"
+            elif "webformatURL" in pick:
+                url = pick.get("webformatURL") or pick.get("largeImageURL")
+                source = "pixabay"
+            else:
+                url = None
+                source = "unknown"
+            if url:
+                pure = Path(out_path)
+                if pure.suffix.lower() not in ALLOWED_OUTPUT_TYPES:
+                    pure = pure.with_suffix(".jpg")
+                if _pexels_download(url, pure):
+                    actual = _resolve_downloaded(pure)
+                    pid = _photo_id_from_result(pick, source)
+                    if persist_used:
+                        record_used_photo_id(pid)
+                    return (actual if actual else pure, pid)
+        print(f"    ⚠️ Pexels exhausted all candidates for '{query}'")
+        return (None, None)
+    print(f"    ⚠️ Pexels search failed for '{query}': {last_error}")
+    return (None, None)
 
 def _resolve_downloaded(hint: Path) -> Optional[Path]:
     """Find the real file written for `hint` (any allowed extension)."""

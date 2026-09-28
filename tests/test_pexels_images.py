@@ -27,6 +27,9 @@ from unittest import TestCase, mock
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+# Isolate the persistent "used image" ledger to a temp file for offline tests.
+os.environ["PEXELS_USED_LEDGER"] = str(Path(tempfile.mkdtemp()) / "test_ledger.json")
+
 # Import order matters: importing write_article triggers lib import.
 import lib.pexels_images as px
 import write_article as wa
@@ -34,7 +37,7 @@ import write_article as wa
 
 def _fake_photo(width: int = 1280) -> dict:
     """A Pexels-shaped photo dict the resolver understands."""
-    return {"src": {"large2x": "https://images.pexels.example/_fake_a.jpg",
+    return {"id": 100000 + width, "src": {"large2x": "https://images.pexels.example/_fake_a.jpg",
                     "large": "https://images.pexels.example/_fake_b.jpg",
                     "medium": "https://images.pexels.example/_fake_c.jpg"},
             "width": width, "photographer": "Test"}
@@ -182,7 +185,7 @@ class DraftFlowIntegrationTestCase(TestCase):
             with mock.patch.object(px, "search_pexels", return_value=[_fake_photo()]), \
                  mock.patch.object(px, "_pexels_download", side_effect=self._download_then_jpg):
                 ok = wa.run_image_search("data dashboard", d, 5, description="数据看板")
-            self.assertTrue(ok)
+            self.assertIsNotNone(ok)  # photo-id string (possibly '') on success
             self.assertTrue((d / "image-005-pexels.jpg").exists())
 
     def test_run_image_search_existing_skips_redownload(self):
@@ -194,7 +197,7 @@ class DraftFlowIntegrationTestCase(TestCase):
             with mock.patch.object(px, "search_pexels",
                                    side_effect=AssertionError("must not search")):
                 ok = wa.run_image_search("data dashboard", d, 6, description="数据看板")
-            self.assertTrue(ok)
+            self.assertIsNotNone(ok)
             self.assertTrue(target.exists())
 
     def test_placeholder_alt_text_extraction(self):
@@ -205,6 +208,55 @@ class DraftFlowIntegrationTestCase(TestCase):
         self.assertEqual(m[2], "攻击面分析")
         self.assertIn(3, m)
 
+
+
+class DedupTestCase(TestCase):
+    """Persistent used-image ledger + per-article exclusion behavior."""
+
+    def _photo(self, pid: int, width: int = 1200) -> dict:
+        return {"src": {"large2x": f"https://images.pexels.example/p{pid}.jpg",
+                        "large": "", "medium": "", "original": ""},
+                "width": width, "id": pid}
+
+    def _dl(self, url, out_path):  # write a >5KB file
+        out = Path(out_path)
+        if out.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+            out = out.with_suffix(".jpg")
+        _jpg(out)
+        return True
+
+    def test_exclude_ids_prevents_same_photo_two_placeholders(self):
+        """Same-photo duplication within one article is prevented via exclude_ids."""
+        # search_pexels always returns the SAME single photo (id=99) regardless of page.
+        with tempfile.TemporaryDirectory() as d,              mock.patch.object(px, "search_pexels", return_value=[self._photo(99)]),              mock.patch.object(px, "_pexels_download", side_effect=self._dl):
+            d = Path(d)
+            # Call 1: no exclusion -> picks photo 99.
+            r1 = px.resolve_image(d / "image-a.jpg", description="data analytics",
+                                  allow_generative=False)
+            self.assertEqual(r1.photo_id, "99")
+            # Call 2 for a SECOND placeholder in the SAME article: exclude 99.
+            r2 = px.resolve_image(d / "image-b.jpg", description="business workflow",
+                                  allow_generative=False, exclude_ids={"99"})
+            # Exclusion exhausted -> minimal fallback to reuse 99 (keeps rendering).
+            self.assertEqual(r2.photo_id, "99")
+
+    def test_ledger_persists_used_photo_ids(self):
+        """A successfully used Pexels photo is recorded in the persistent ledger."""
+        os.environ["PEXELS_USED_LEDGER"] = str(
+            Path(tempfile.mkdtemp()) / "ledger_persist.json")
+        # USED_LEDGER_PATH is computed at import; force reload to honor the env.
+        import importlib
+        importlib.reload(px)
+        try:
+            with tempfile.TemporaryDirectory() as d,                  mock.patch.object(px, "search_pexels", return_value=[self._photo(555)]),                  mock.patch.object(px, "_pexels_download", side_effect=self._dl):
+                px.resolve_image(Path(d) / "image-c.jpg", description="cybersecurity",
+                                 allow_generative=False)
+            self.assertIn("555", px.load_used_photo_ids())
+        finally:
+            env = os.environ.get("PEXELS_USED_LEDGER")
+            if env:
+                os.environ.pop("PEXELS_USED_LEDGER", None)
+            importlib.reload(px)
 
 if __name__ == "__main__":
     sys.exit(__import__("unittest").main())

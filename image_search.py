@@ -57,12 +57,39 @@ def _use_placeholder(output_path: Path, index: int) -> bool:
         return False
 
 
-def search_pexels(query: str, per_page: int = 5) -> list[dict]:
-    """Search Pexels and return list of photo dicts."""
+def search_pexels(
+    query: str,
+    per_page: int = 5,
+    page: int | None = None,
+    max_random_page: int = 6,
+    exclude_ids: set | frozenset | None = None,
+) -> list[dict]:
+    """Search Pexels and return list of photo dicts.
+
+    Args:
+        query:        Pexels search string.
+        per_page:     page size.
+        page:         explicit Pexels page. If None, a random page in
+                      [1, max_random_page] is chosen so repeated searches for
+                      the same query do NOT always return the same page-1
+                      thumbs (the historical cause of reused top-1 photos).
+        max_random_page: upper bound for the random page when ``page`` is None.
+        exclude_ids:  photo IDs (Pexels numeric slug) to filter out client-side.
+                      Best-effort dedup; the authoritative persistent ledger
+                      lives in lib.pexels_images.
+    """
     if not PEXELS_API_KEY:
         print("    ⚠️ PEXELS_API_KEY not set; skipping Pexels")
         return []
-    params = urllib.parse.urlencode({"query": query, "per_page": per_page, "orientation": "landscape"})
+    import random as _random
+    eff_page = page if page is not None else (
+        _random.randint(1, max(1, max_random_page)))
+    params = urllib.parse.urlencode({
+        "query": query,
+        "per_page": per_page,
+        "page": eff_page,
+        "orientation": "landscape",
+    })
     url = f"{PEXELS_URL}?{params}"
     req = urllib.request.Request(url, headers={
         "Authorization": PEXELS_API_KEY,
@@ -71,11 +98,27 @@ def search_pexels(query: str, per_page: int = 5) -> list[dict]:
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
-            return data.get("photos", [])
+            photos = data.get("photos", [])
+        if exclude_ids:
+            photos = [
+                ph for ph in photos if not _photo_id(ph) in exclude_ids
+            ]
+        return photos
     except Exception as e:
         print(f"    ⚠️ Pexels search failed: {e}")
         return []
 
+
+def _photo_id(photo: dict) -> str | None:
+    """Best-effort photo ID from a Pexels (or Pixabay) photo dict."""
+    # Pexels photo dicts carry an integer ``id``.
+    pid = photo.get("id")
+    if pid is not None:
+        return str(pid)
+    src_id = photo.get("src", {}).get("id")
+    if src_id is not None:
+        return str(src_id)
+    return None
 
 def search_pixabay(query: str, per_page: int = 5) -> list[dict]:
     """Search Pixabay and return list of image dicts."""

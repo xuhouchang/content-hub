@@ -678,25 +678,33 @@ def _registrable_domain(url: str) -> str:
     return last_two
 
 
-def sample_materials(materials: list[dict], max_count: int = 5) -> list[dict]:
+def sample_materials(materials: list[dict], max_count: int = 5, skip_used_filter: bool = False) -> list[dict]:
     """Sample materials for LLM context: cluster by tags, pick best cluster.
 
     Strategy:
-    1. Filter out used materials
-    2. Filter out recently-used URLs
+    1. Filter out materials marked 'used' in all_urls.tsv (unless ``skip_used_filter``)
+    2. Filter out recently-used URLs (past 3 days)
     3. Load LLM tag database for tag-based clustering
     4. Cluster materials by tag similarity (or fallback keyword clustering)
     5. Pick the best cluster
+
+    ``skip_used_filter``: True for the ``--materials`` override path. When the
+    daily selector already curated today's candidates (and content-hash dedup in
+    runtime.py governs cross-day reprint dedup), re-filtering them against the
+    legacy ``all_urls.tsv`` 'used' status is redundant and can wrongly empty a
+    fresh selection. The past-3-day recent-URL filter below is still applied, so
+    cross-day dedup on recently published URLs is preserved.
 
     Returns top-scoring materials from the best cluster.
     """
     if not materials:
         return []
 
-    # ── CODE-LEVEL FILTER: Exclude materials marked 'used' in all_urls.tsv ──
-    materials = filter_used_materials(materials)
-    if not materials:
-        return []
+    if not skip_used_filter:
+        # ── CODE-LEVEL FILTER: Exclude materials marked 'used' in all_urls.tsv ──
+        materials = filter_used_materials(materials)
+        if not materials:
+            return []
 
     # ── Exclude recently used URLs (past 3 days) ──
     recent_topics_file = WORKSPACE_DIR / "wechat-articles" / "_recent_topics.json"

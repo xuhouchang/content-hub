@@ -29,9 +29,10 @@ import time
 from pathlib import Path
 
 # ── Scoring model ──
-# Uses deepseek/deepseek-v4-flash for reliability and cost.
-# Falls back to OpenAI Codex when available.
-SCORING_MODEL = os.environ.get("SCORING_MODEL", "deepseek-v4-flash")
+# 选题/素材打分归属强模型（Gemini 3.7 Flash），继承 lib.models 的 MODEL_TOPIC。
+# SCORING_MODEL 单独设置时覆盖（向后兼容）；否则与选题模型一致。
+from lib.models import get_model as _get_model  # noqa: E402
+SCORING_MODEL = os.environ.get("SCORING_MODEL", _get_model("topic"))
 
 # ── Batch config ──
 MAX_BATCH_SIZE = 10  # materials per LLM call

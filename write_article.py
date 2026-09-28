@@ -929,7 +929,8 @@ def run_image_search(
     output_dir: str,
     index: int = 1,
     description: str = "",
-) -> bool:
+    exclude_ids: Optional[set[str] | frozenset[str]] = None,
+) -> Optional[str]:
     """Resolve one placeholder with a Pexels-first policy.
 
     With PEXELS_FIRST enabled (default), tries the reusable, in-process resolver
@@ -939,19 +940,25 @@ def run_image_search(
     subprocess (Pexels -> Pixabay -> local placeholder), so the article still
     renders a real file.
 
-    Returns True if an image file for index `index` now exists.
+    ``exclude_ids``: Pexels photo IDs already chosen for EARLIER placeholders in
+    this SAME article. They are merged with the persistent history ledger inside
+    lib.pexels_images, so we do not stock two different placeholders in one
+    article with the same stock photo.
+
+    Returns the chosen Pexels photo ID on success (best-effort; '' if unknown),
+    else '' on a degraded-but-usable result, and None on failure.
     """
     # R1: skip remaining image searches when the global budget is nearly
     # exhausted. We guard here (in addition to image_search.py itself) so we
-    # don't even spawn the subprocess — the writer then finishes and publishes
+    # don't even spawn the subprocess - the writer then finishes and publishes
     # instead of being killed at the 900s parent limit.
     try:
         _img_deadline = float(os.environ.get("IMAGE_SEARCH_DEADLINE", "0"))
     except ValueError:
         _img_deadline = 0.0
     if _img_deadline and time.time() > _img_deadline - 60:
-        print(f"  ⏱️ Image-search budget nearly exhausted; skipping '{query}' (placeholder fallback)")
-        return False
+        print(f"  ⏰ Image-search budget nearly exhausted; skipping '{query}' (placeholder fallback)")
+        return None
 
     images_dir = Path(output_dir)
     images_dir.mkdir(parents=True, exist_ok=True)
@@ -973,15 +980,16 @@ def run_image_search(
             allow_generative=False,   # body images: never silently generate here
             gen_fallback=None,
             long_edge=px.DEFAULT_LONG_EDGE,
+            exclude_ids=exclude_ids,
         )
         if res.ok and res.path and res.path.exists():
-            return True
+            return res.photo_id or ""
         print(f"  ⚠️ Pexels-first no hit for '{search_q}': {res.reason}")
 
     # Legacy subprocess fallback (Pexels -> Pixabay -> local placeholder).
     if not IMAGE_MATCHER_SCRIPT.exists():
         print(f"  ⚠️ image_search.py not found: {IMAGE_MATCHER_SCRIPT}")
-        return False
+        return None
     cmd = [
         sys.executable, str(IMAGE_MATCHER_SCRIPT),
         query,
@@ -993,14 +1001,13 @@ def run_image_search(
         if result.returncode == 0:
             import glob
             image_files = glob.glob(os.path.join(output_dir, f"image-{index:03d}-*"))
-            return len(image_files) > 0
+            return "" if image_files else None
         if result.stderr:
             print(f"    ⚠️ {result.stderr.strip()}")
-        return False
+        return None
     except subprocess.TimeoutExpired:
         print(f"  ⚠️ image_search.py timed out")
-        return False
-
+        return None
 
 def generate_image_search_queries(article_text: str, num_placeholders: int) -> list[str]:
     """Generate English search queries for image matching based on article content."""
@@ -1078,12 +1085,11 @@ def write_article(
             enriched.append(normalized_item)
         print(f"  Loaded {len(enriched)} materials from override")
 
-        # ⛔ CODE-LEVEL FILTER: Remove materials already marked 'used'
-        from lib.materials import filter_used_materials
-        enriched = filter_used_materials(enriched)
-        if not enriched:
-            print("  ❌ All override materials have been used before")
-            return None
+        # 当日选题器(runtime.py)已经通过内容哈希去重选好素材，直接信任这份候选：
+        # 不再用 all_urls.tsv 的历史 used 状态二次过滤。否则若这批当日素材里
+        # 恰好有历史 used 标记，会被再次过滤为空 → 整篇文章产出失败。
+        # 跨天去重由上游 content-hash dedup + sample_materials 的近 3 天
+        # recent_used_urls 过滤共同保证，这里移除 redundant 的 legacy 过滤。
     else:
         # Step 1: Get collected materials
         print("\n1️⃣  Reading collected materials...")
@@ -1117,7 +1123,7 @@ def write_article(
 
     # Step 4: Sample materials for LLM
     print("\n4️⃣  Sampling materials for writing...")
-    sampled = sample_materials(enriched, max_materials)
+    sampled = sample_materials(enriched, max_materials, skip_used_filter=bool(materials_override))
     print(f"  Selected {len(sampled)} materials")
 
     # ⛔ STRONG GUARD: If no materials were sampled after all filtering, abort.
@@ -1221,7 +1227,8 @@ def write_article(
         print("  📋 No recent articles found for angle check")
 
     # Step 6: Build context and call LLM
-    print("\n6️⃣  Calling OpenAI (GPT-5.4 via OpenRouter) for article writing...")
+    # 修正：实际用的模型来自 --model / lib.models.get_model("writing")，如实打印
+    print(f"\n6️⃣  调用写作模型 {model} 生成文章...")
     context = build_material_context(sampled)
 
     # Build angle-avoidance instruction from recent articles
@@ -1624,15 +1631,22 @@ def write_article(
         # Map placeholder description (alt text) per image index so the Pexels-first
         # resolver can search using the actual caption rather than a generic query.
         placeholder_descs = _extract_placeholder_alt_text(article)
+        # Track Pexels photo IDs already chosen for earlier placeholders in THIS
+        # article so we never put the same stock photo into two slots (dedup).
+        used_photo_ids = set()
         for i, query in enumerate(queries[:num_placeholders + 1], 1):
             desc = placeholder_descs.get(i, "")
             print(f"  Searching image {i}/{min(len(queries), num_placeholders + 1)}: '{query}'"
                   + (f" (desc: {desc[:24]}...)" if desc else ""))
-            success = run_image_search(query, str(images_dir), i, description=desc)
-            if success:
+            chosen = run_image_search(query, str(images_dir), i, description=desc,
+                                      exclude_ids=used_photo_ids)
+            if chosen is not None:
+                if chosen:
+                    used_photo_ids.add(chosen)
                 print(f"    ✓ Images downloaded")
             else:
                 print(f"    ⚠️ No images found for this query")
+
     else:
         print("  ⚠️ No placeholders found, adding default placeholders")
         # Add placeholders every ~1000 chars
@@ -1657,9 +1671,13 @@ def write_article(
             "organization workflow",
             "decision making strategy",
         ]
+        used_photo_ids = set()
         for i, query in enumerate(default_queries[:4], 1):
             print(f"  Searching image {i}: '{query}'...")
-            run_image_search(query, str(images_dir), i)
+            chosen = run_image_search(query, str(images_dir), i,
+                                      exclude_ids=used_photo_ids)
+            if chosen:
+                used_photo_ids.add(chosen)
 
     # Step 8: Embed images
     print("\n8️⃣  Embedding images...")

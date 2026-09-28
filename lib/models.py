@@ -12,12 +12,13 @@ Usage:
 Environment variable overrides:
     MODEL_WRITING      — 公众号写作 (default: google/gemini-3.7-flash)
     MODEL_POLISH       — 润色       (default: google/gemini-3.7-flash)
+    MODEL_TOPIC        — 选题/素材打分与聚类打标签 (default: google/gemini-3.7-flash)
     MODEL_CASE         — 案例拆解   (default: deepseek/deepseek-v4-flash)
     MODEL_FILTER       — 素材过滤   (default: deepseek/deepseek-v4-flash)
     MODEL_SYNTHESIS    — 周度整合   (default: deepseek/deepseek-v4-flash)
     MODEL_FRAMEWORK    — 框架文章   (default: deepseek/deepseek-v4-flash)
 
-写作/润色走强模型（Gemini 3.7 Flash），打分/选题/过滤等批量环节走便宜模型（DeepSeek）。
+写作/润色/选题走强模型（Gemini 3.7 Flash），案例拆解/过滤/整合等批量环节走便宜模型（DeepSeek）。
 
 Legacy:
     WRITING_MODEL env var is still respected as a blanket fallback.
@@ -32,7 +33,9 @@ _MODELS = {
     # 写作/润色用强模型（Gemini 3.7 Flash），保证文章质量
     "writing":    os.environ.get("MODEL_WRITING",    "google/gemini-3.7-flash"),
     "polish":     os.environ.get("MODEL_POLISH",     "google/gemini-3.7-flash"),
-    # 打分/选题/过滤等批量环节用便宜模型
+    # 选题/素材打分与聚类打标签用强模型（Gemini 3.7 Flash）
+    "topic":      os.environ.get("MODEL_TOPIC",      "google/gemini-3.7-flash"),
+    # 案例拆解/过滤/整合等批量环节用便宜模型
     "case":       os.environ.get("MODEL_CASE",       "deepseek/deepseek-v4-flash"),
     "filter":     os.environ.get("MODEL_FILTER",     "deepseek/deepseek-v4-flash"),
     "synthesis":  os.environ.get("MODEL_SYNTHESIS",  "deepseek/deepseek-v4-flash"),
@@ -44,7 +47,7 @@ def get_model(purpose: str) -> str:
     """Get the configured model for a given purpose.
 
     Args:
-        purpose: One of "writing", "polish", "case", "filter",
+        purpose: One of "writing", "polish", "topic", "case", "filter",
                  "synthesis", "framework".
 
     Returns:
