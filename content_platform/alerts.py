@@ -56,40 +56,58 @@ def record_job_result(
             except (TypeError, ValueError):
                 previous_streak = 0
 
-            last_run_id = str(current.get("last_run_id", "") or "")
-            same_run = bool(run_id) and run_id == last_run_id
-            if failed:
-                # A duplicate trigger for the same run is idempotent: it neither
-                # re-alerts nor counts as a new consecutive failure.
-                streak = previous_streak if same_run else previous_streak + 1
-            else:
-                streak = 0
+            processed_run_ids = [
+                str(existing)
+                for existing in (current.get("processed_run_ids") or [])
+                if existing
+            ]
+            # Deduplicate against every run already recorded for this job, not
+            # just the immediately previous one, so replaying an older run ID
+            # (out of order) is still idempotent.
+            is_replay = bool(run_id) and run_id in processed_run_ids
 
-            alert_active = bool(current.get("alert_active", False)) if failed else False
-            already_alerted_for_run = bool(run_id) and run_id == str(
-                current.get("alert_run_id", "") or ""
-            )
-            should_alert = (
-                failed
-                and streak >= threshold
-                and not alert_active
-                and not already_alerted_for_run
-            )
-            recovered = not failed and previous_streak >= threshold
-            current.update({
-                "status": status,
-                "last_run_at": now,
-                "last_run_id": run_id or current.get("last_run_id", ""),
-                "consecutive_failures": streak,
-                "last_error": (reason or status)[:500] if failed else "",
-                "alert_active": alert_active or should_alert,
-            })
-            if should_alert:
-                current["alert_run_id"] = run_id or current.get("last_run_id", "")
-                current["last_alert_at"] = now
-            if recovered:
-                current["recovered_at"] = now
-                current["alert_active"] = False
+            if is_replay:
+                # A replayed run never changes the streak, never re-alerts and
+                # never re-records recovery.
+                streak = previous_streak
+                alert_active = bool(current.get("alert_active", False))
+                should_alert = False
+                recovered = False
+            else:
+                if failed:
+                    streak = previous_streak + 1
+                else:
+                    streak = 0
+                alert_active = bool(current.get("alert_active", False)) if failed else False
+                already_alerted_for_run = bool(run_id) and run_id == str(
+                    current.get("alert_run_id", "") or ""
+                )
+                should_alert = (
+                    failed
+                    and streak >= threshold
+                    and not alert_active
+                    and not already_alerted_for_run
+                )
+                recovered = not failed and previous_streak >= threshold
+                current.update({
+                    "status": status,
+                    "last_run_at": now,
+                    "last_run_id": run_id or current.get("last_run_id", ""),
+                    "consecutive_failures": streak,
+                    "last_error": (reason or status)[:500] if failed else "",
+                    "alert_active": alert_active or should_alert,
+                })
+                if should_alert:
+                    current["alert_run_id"] = run_id or current.get("last_run_id", "")
+                    current["last_alert_at"] = now
+                if recovered:
+                    current["recovered_at"] = now
+                    current["alert_active"] = False
+                if run_id:
+                    processed_run_ids.append(run_id)
+            if processed_run_ids:
+                # Bounded so the state file cannot grow without limit.
+                current["processed_run_ids"] = processed_run_ids[-50:]
             payload[job_name] = current
             temp = state_file.with_suffix(".json.tmp")
             temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

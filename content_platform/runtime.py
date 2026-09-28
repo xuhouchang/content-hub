@@ -598,8 +598,9 @@ def _invoke_legacy_writer(script_path: Path, date_str: str, materials_file: str,
         return subprocess.CompletedProcess(cmd, 124, stdout, stderr)
 
 
-def _write_job_log(job_dir: Path, filename: str, content: str) -> str:
-    path = job_dir / filename
+def _write_job_log(log_dir: Path, filename: str, content: str) -> str:
+    path = log_dir / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return str(path)
 
@@ -614,14 +615,14 @@ def _extract_output_dir(stdout: str) -> str | None:
 
 
 def _capture_writer_artifacts(
-    job_dir: Path, result: subprocess.CompletedProcess, label: str = ""
+    log_dir: Path, result: subprocess.CompletedProcess, label: str = ""
 ) -> dict:
     stdout = result.stdout or ""
     stderr = result.stderr or ""
     artifacts = {
         "writer_returncode": result.returncode,
-        "writer_stdout_log": _write_job_log(job_dir, f"writer{label}_stdout.log", stdout),
-        "writer_stderr_log": _write_job_log(job_dir, f"writer{label}_stderr.log", stderr),
+        "writer_stdout_log": _write_job_log(log_dir, f"writer{label}_stdout.log", stdout),
+        "writer_stderr_log": _write_job_log(log_dir, f"writer{label}_stderr.log", stderr),
     }
     output_dir = _extract_output_dir(stdout)
     if output_dir:
@@ -725,9 +726,9 @@ def run_article_daily(
                 if legacy_result.returncode == 0:
                     _persist_selected_content_hashes(mat_file, workspace_dir=resolved_workspace)
                 writer_all_exit_codes.append(legacy_result.returncode)
-                # M3: per-article logs, named by article index, so a second article
-                # never overwrites the first one's evidence.
-                captured = _capture_writer_artifacts(job_dir, legacy_result, label=f"_{i+1}")
+                # M3: per-article logs live inside runs/<run_id>/ so a later
+                # same-day run can never overwrite this run's evidence.
+                captured = _capture_writer_artifacts(store.run_dir, legacy_result, label=f"_{i+1}")
                 writer_artifacts[f"writer_{i+1}_returncode"] = captured["writer_returncode"]
                 writer_artifacts[f"writer_{i+1}_stdout_log"] = captured["writer_stdout_log"]
                 writer_artifacts[f"writer_{i+1}_stderr_log"] = captured["writer_stderr_log"]
@@ -836,7 +837,7 @@ def run_case_daily(
                 date_str=date_str,
                 materials_file=result["materials_file"],
             )
-            job["artifacts"].update(_capture_writer_artifacts(job_dir, legacy_result))
+            job["artifacts"].update(_capture_writer_artifacts(store.run_dir, legacy_result))
             if legacy_result.returncode != 0:
                 status = "failed"
                 stage_reason = f"case writer exit code {legacy_result.returncode}"

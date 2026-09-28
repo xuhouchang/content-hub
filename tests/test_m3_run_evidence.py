@@ -84,11 +84,39 @@ def test_article_daily_writes_per_article_logs(tmp_path: Path, monkeypatch):
 
     assert job["status"] == "success"
     job_dir = _job_dir(tmp_path)
-    assert "first ok" in (job_dir / "writer_1_stdout.log").read_text(encoding="utf-8")
-    assert "second ok" in (job_dir / "writer_2_stdout.log").read_text(encoding="utf-8")
+    run_dir = job_dir / "runs" / job["run_id"]
+    assert "first ok" in (run_dir / "writer_1_stdout.log").read_text(encoding="utf-8")
+    assert "second ok" in (run_dir / "writer_2_stdout.log").read_text(encoding="utf-8")
     index = _read_json(job_dir.parent / "index.json")
     assert index[-1]["run_id"] == job["run_id"]
     assert index[-1]["status"] == "success"
+
+
+def test_two_same_day_runs_keep_separate_writer_logs(tmp_path: Path, monkeypatch):
+    outputs = iter(["run one output", "run two output"])
+
+    def fake_run(cmd, capture_output, text, timeout, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=next(outputs), stderr="")
+
+    monkeypatch.setattr(runtime_module.subprocess, "run", fake_run)
+
+    first = runtime_module.run_article_daily(
+        date_str="2026-06-03",
+        workspace_dir=tmp_path,
+        materials=[_evidence_material("First", "c1")],
+    )
+    second = runtime_module.run_article_daily(
+        date_str="2026-06-03",
+        workspace_dir=tmp_path,
+        materials=[_evidence_material("Second", "c2")],
+    )
+
+    assert first["run_id"] != second["run_id"]
+    job_dir = _job_dir(tmp_path)
+    first_log = job_dir / "runs" / first["run_id"] / "writer_1_stdout.log"
+    second_log = job_dir / "runs" / second["run_id"] / "writer_1_stdout.log"
+    assert first_log.read_text(encoding="utf-8") == "run one output"
+    assert second_log.read_text(encoding="utf-8") == "run two output"
 
 
 def test_mixed_success_failure_records_partial_and_health(tmp_path: Path, monkeypatch):
@@ -194,6 +222,27 @@ def test_alert_emitted_once_and_deduplicated_by_run_id(tmp_path: Path, monkeypat
     state = _health(tmp_path)["article-daily"]
     assert state["alert_run_id"] == "run-2"
     assert state["alert_active"] is True
+
+
+def test_replayed_older_run_id_is_idempotent(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("PIPELINE_ALERT_AFTER_FAILURES", "2")
+
+    first = record_job_result(tmp_path, "article-daily", "failed", run_id="run-1")
+    second = record_job_result(tmp_path, "article-daily", "failed", run_id="run-2")
+    # Replaying an older run ID out of order must be idempotent.
+    replay = record_job_result(tmp_path, "article-daily", "failed", run_id="run-1")
+
+    assert first["consecutive_failures"] == 1
+    assert second["consecutive_failures"] == 2
+    assert replay["consecutive_failures"] == 2
+    assert replay["alert"] is False
+    state = _health(tmp_path)["article-daily"]
+    assert state["consecutive_failures"] == 2
+
+    # A genuinely new failure still counts, and the active alert stays deduped.
+    third = record_job_result(tmp_path, "article-daily", "failed", run_id="run-3")
+    assert third["consecutive_failures"] == 3
+    assert third["alert"] is False
 
 
 def test_recovery_clears_alert_and_records_it(tmp_path: Path, monkeypatch):

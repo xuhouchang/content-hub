@@ -90,6 +90,17 @@ class JobStateStore:
     def read_job(self) -> dict[str, Any]:
         return json.loads(self.job_file.read_text(encoding="utf-8"))
 
+    @property
+    def run_dir(self) -> Path:
+        """Directory holding this run's isolated artifacts (logs, run job.json).
+
+        Falls back to the shared job directory only before ``start_job`` has
+        assigned a run ID, so a rerun can never overwrite another run's logs.
+        """
+        if self.run_id:
+            return self.runs_dir / self.run_id
+        return self.job_dir
+
     def finalize(self, job: dict[str, Any], status: str, stage_reason: str = "") -> dict[str, Any]:
         """Record a terminal state with reason, then persist and return the job."""
         job["status"] = status
