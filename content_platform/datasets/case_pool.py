@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from content_platform.dedup import content_hash_seen
 from content_platform.recent_topics import recent_cluster_ids
 
 CASE_DETAIL_THRESHOLD = 0.6
@@ -30,17 +31,33 @@ def build_case_pool(
 ) -> dict:
     """Build the case pool, comparing topics ONLY against case history.
 
-    Article diversity is judged separately; the cross-type guard lives in the
-    pipeline and shares only the normalized source URL / content hash.
+    Article diversity is judged separately; the cross-type guard shares only the
+    normalized source URL and the content-hash registry.
     """
     recent_clusters = _recent_cluster_ids(topic_memory) | _used_cluster_ids(
         days=7, workspace_dir=workspace_dir
     )
-    candidates = [
-        material
-        for material in materials
-        if material.get("editorial_fit_score", 0.0) >= PRIMARY_TOPIC_THRESHOLD
-        and material.get("execution_detail_score", 0.0) >= CASE_DETAIL_THRESHOLD
-        and material.get("dedup", {}).get("cluster_id") not in recent_clusters
-    ]
-    return {"candidates": candidates}
+    candidates: list[dict] = []
+    rejected: list[dict] = []
+    for material in materials:
+        title = material.get("title", "") or ""
+        if material.get("editorial_fit_score", 0.0) < PRIMARY_TOPIC_THRESHOLD:
+            rejected.append({"title": title, "reason": "below_editorial_threshold"})
+            continue
+        if material.get("execution_detail_score", 0.0) < CASE_DETAIL_THRESHOLD:
+            rejected.append({"title": title, "reason": "insufficient_execution_detail"})
+            continue
+        if material.get("dedup", {}).get("cluster_id") in recent_clusters:
+            rejected.append({"title": title, "reason": "recent_case_cluster"})
+            continue
+        # Cross-type content-hash dedup at the selection boundary.
+        duplicate_of = content_hash_seen(material, workspace_dir)
+        if duplicate_of:
+            rejected.append({
+                "title": title,
+                "reason": "recent_content_hash",
+                "duplicate_of": str(duplicate_of),
+            })
+            continue
+        candidates.append(material)
+    return {"candidates": candidates, "rejected": rejected}

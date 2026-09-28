@@ -23,6 +23,7 @@ from lib import (
     is_duplicate,
     append_to_url_registry,
 )
+from content_platform.normalize.urls import normalized_url_key
 from content_platform.recent_topics import recent_source_urls, recent_topics
 
 # ── Paths ──
@@ -707,7 +708,7 @@ def sample_materials(materials: list[dict], max_count: int = 5, skip_used_filter
     if recently_used_urls:
         print(f"  🚫 Excluding {len(recently_used_urls)} recently used URLs")
         before = len(materials)
-        materials = [m for m in materials if m.get("url", "").rstrip("/").lower() not in recently_used_urls]
+        materials = [m for m in materials if normalized_url_key(m.get("url", "")) not in recently_used_urls]
         after = len(materials)
         if before != after:
             print(f"  Filtered out {before - after} materials (used in last 3 days)")

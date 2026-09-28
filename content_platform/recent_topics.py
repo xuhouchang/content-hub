@@ -7,6 +7,8 @@ import fcntl
 import json
 from pathlib import Path
 
+from content_platform.normalize.urls import normalized_url_key
+
 
 LEGACY_FILE_NAME = "_recent_topics.json"
 LEDGER_FILES = {
@@ -120,7 +122,7 @@ def recent_source_urls(
                 continue
             for url in entry.get("source_urls", []):
                 if url:
-                    urls.add(str(url).rstrip("/").lower())
+                    urls.add(normalized_url_key(str(url)))
     return urls
 
 

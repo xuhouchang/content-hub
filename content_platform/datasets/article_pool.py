@@ -8,6 +8,7 @@ also used for explainable ranking, instead of a new opaque numeric cutoff.
 import re
 from pathlib import Path
 
+from content_platform.dedup import content_hash_seen
 from content_platform.recent_topics import recent_cluster_ids
 
 PRIMARY_TOPIC_THRESHOLD = 0.65
@@ -159,6 +160,18 @@ def build_article_pool(
             continue
         if material.get("dedup", {}).get("cluster_id") in recent_clusters:
             rejected.append({"title": title, "reason": "recent_cluster"})
+            continue
+
+        # ── Cross-type content-hash dedup at the selection boundary ──
+        # A reprint with a different URL but the same body was already
+        # published, so it must not be selected again.
+        duplicate_of = content_hash_seen(material, workspace_dir)
+        if duplicate_of:
+            rejected.append({
+                "title": title,
+                "reason": "recent_content_hash",
+                "duplicate_of": str(duplicate_of),
+            })
             continue
 
         # ── Stage 2: Exclude AI safety topics (with exception check) ──

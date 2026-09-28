@@ -107,6 +107,89 @@ def test_two_workspaces_do_not_share_history(tmp_path: Path):
     assert build_article_pool([article_material], {"recent_outputs": []}, workspace_dir=workspace_b)["candidates"]
 
 
+def test_cross_type_url_dedup_uses_tracking_aware_normalization(tmp_path: Path):
+    # History stored a tracking-param + fragment variant of the URL.
+    _write_topic(
+        tmp_path,
+        "article",
+        "cluster-art",
+        "https://example.com/post/?utm_source=newsletter#top",
+    )
+    # The clean equivalent must be skipped by the case pipeline.
+    result = run_case_study_pipeline(
+        date_str="2026-06-03",
+        workspace_dir=tmp_path,
+        materials=[_material("case-clean", url="https://example.com/post")],
+    )
+    assert result["selected"] is None
+    assert result["status"] == "failed"
+
+    # Reverse direction: a case URL with a query variant blocks the clean
+    # article candidate.
+    _write_topic(tmp_path, "case", "cluster-case", "https://example.com/report?utm_medium=email")
+    article = select_candidates(
+        [_material("art-clean", url="https://example.com/report")],
+        n=1,
+        workspace_dir=tmp_path,
+    )
+    assert article["selected"] == []
+    assert article["decisions"][0]["reason"] == "recent_source_url"
+
+
+def test_content_hash_dedup_at_article_and_case_boundaries(tmp_path: Path):
+    from lib import mark_content_seen
+
+    body = "enterprise deployment rollout detail " * 20  # > MIN_CONTENT_DEDUP_CHARS
+    mark_content_seen("sha256:deadbeef", "https://example.com/original", workspace_dir=tmp_path)
+
+    article = _material("art-reprint", url="https://example.com/art-reprint")
+    article["content_hash"] = "sha256:deadbeef"
+    article["content_text"] = body
+    article_pool = build_article_pool(
+        [article], {"recent_outputs": []}, workspace_dir=tmp_path
+    )
+    assert article_pool["candidates"] == []
+    assert any(r["reason"] == "recent_content_hash" for r in article_pool["rejected"])
+
+    case = _material("case-reprint", url="https://example.com/case-reprint")
+    case["content_hash"] = "sha256:deadbeef"
+    case["content_text"] = body
+    case_pool = build_case_pool([case], {"recent_outputs": []}, workspace_dir=tmp_path)
+    assert case_pool["candidates"] == []
+    assert any(r["reason"] == "recent_content_hash" for r in case_pool["rejected"])
+
+
+def test_content_hash_dedup_applies_to_explicit_material_inputs(tmp_path: Path, monkeypatch):
+    from lib import mark_content_seen
+
+    body = "enterprise deployment rollout detail " * 20
+    mark_content_seen("sha256:feedface", "https://example.com/case-original", workspace_dir=tmp_path)
+    monkeypatch.setattr(
+        runtime_module.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else "cmd", 0, stdout="ok", stderr=""),
+    )
+
+    case_material = _material("case-reprint", url="https://example.com/case-reprint")
+    case_material["content_hash"] = "sha256:feedface"
+    case_material["content_text"] = body
+    case_job = runtime_module.run_case_daily(
+        date_str="2026-06-03", workspace_dir=tmp_path, materials=[case_material]
+    )
+    assert case_job["status"] == "failed"
+    assert case_job["artifacts"]["selected_count"] == 0
+
+    article_material = _material("art-reprint", url="https://example.com/art-reprint")
+    article_material["content_hash"] = "sha256:feedface"
+    article_material["content_text"] = body
+    article_job = runtime_module.run_article_daily(
+        date_str="2026-06-03", workspace_dir=tmp_path, materials=[article_material]
+    )
+    assert article_job["status"] == "failed"
+    assert article_job["artifacts"]["candidate_count"] == 0
+    assert article_job["artifacts"]["rejection_counts"].get("recent_content_hash") == 1
+
+
 def test_record_case_recent_topic_writes_comparable_cluster_ids(tmp_path: Path):
     materials_file = tmp_path / "case_materials.json"
     materials_file.write_text(json.dumps([_material("cluster-7")]), encoding="utf-8")

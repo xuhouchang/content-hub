@@ -2,6 +2,7 @@ from pathlib import Path
 
 from content_platform.business.case_study.ranker import rank_case_candidates
 from content_platform.datasets.case_pool import build_case_pool
+from content_platform.normalize.urls import normalized_url_key
 from content_platform.recent_topics import recent_source_urls
 from content_platform.storage.json_store import write_json
 
@@ -15,6 +16,7 @@ def run_case_study_pipeline(
     memory = topic_memory or {"recent_outputs": []}
     pool = build_case_pool(materials, topic_memory=memory, workspace_dir=workspace_dir)
     candidates = pool["candidates"]
+    pool_rejected = pool.get("rejected", [])
     ranked = rank_case_candidates(candidates) if candidates else []
     # ── URL-level dedup: drop candidates whose source URL was used recently
     #    by either content format. Topic-diversity histories remain separate.
@@ -22,11 +24,9 @@ def run_case_study_pipeline(
     if recent_urls:
         deduped = []
         for c in ranked:
-            u = (
-                c.get("canonical_url")
-                or c.get("url")
-                or c.get("normalized_url", "")
-            ).rstrip("/").lower()
+            u = normalized_url_key(
+                c.get("canonical_url") or c.get("url") or c.get("normalized_url", "")
+            )
             if u and u in recent_urls:
                 print(f"  ⏭️  Case skip (same source URL used recently): {str(c.get('title'))[:50]}")
                 continue
@@ -38,10 +38,16 @@ def run_case_study_pipeline(
     selection_file = dataset_dir / "case_selection.json"
     materials_file = dataset_dir / "case_materials.json"
     status = "success" if selected else "failed"
-    write_json(selection_file, {"candidates": ranked, "selected": selected, "status": status})
+    write_json(selection_file, {
+        "candidates": ranked,
+        "rejected": pool_rejected,
+        "selected": selected,
+        "status": status,
+    })
     write_json(materials_file, [selected] if selected else [])
     return {
         "candidates": ranked,
+        "rejected": pool_rejected,
         "selected": selected,
         "selection_file": str(selection_file),
         "materials_file": str(materials_file),

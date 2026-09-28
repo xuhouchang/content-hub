@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 from content_platform.datasets.article_pool import extract_candidate_evidence
+from content_platform.normalize.urls import normalized_url_key
 from content_platform.recent_topics import recent_source_urls, recent_topics
 
 WORKSPACE_DIR = Path(__file__).resolve().parents[3]
@@ -24,7 +25,7 @@ def _referenced_history(recent_topics: list[dict], limit: int = 20) -> list[dict
             "title": str(topic.get("title", "")),
             "date": str(topic.get("date", "")),
             "source_urls": [
-                str(url).rstrip("/").lower()
+                normalized_url_key(url)
                 for url in (topic.get("source_urls") or [])
             ][:5],
         }
@@ -112,7 +113,7 @@ def _load_recent_source_urls(
     recent_urls = recent_source_urls(root, days=days)
     for t in recent_topics:
         for url in t.get("source_urls", []):
-            recent_urls.add(url.rstrip("/"))
+            recent_urls.add(normalized_url_key(url))
     return recent_urls
 
 
@@ -251,13 +252,14 @@ def select_candidates(
             },
         }
 
-        # ── Layer 1: URL-level dedup (deterministic) ──
-        if recent_source_url_set and candidate_url.lower() in recent_source_url_set:
+        # ── Layer 1: URL-level dedup (deterministic, normalization-aware) ──
+        candidate_url_key = normalized_url_key(candidate_url)
+        if recent_source_url_set and candidate_url_key in recent_source_url_set:
             decisions.append({
                 **record,
                 "decision": "rejected",
                 "reason": "recent_source_url",
-                "history_ref": {"match": "source_url", "url": candidate_url.lower()},
+                "history_ref": {"match": "source_url", "url": candidate_url_key},
             })
             continue
 

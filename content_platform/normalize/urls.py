@@ -27,3 +27,16 @@ def normalize_url(url: str) -> str:
     )
     value = urlunsplit(normalized)
     return value[:-1] if value.endswith("/") and normalized_path == "/" else value.rstrip("/")
+
+
+def normalized_url_key(url: str) -> str:
+    """Case-insensitive, tracking-stripped key for dedup comparisons.
+
+    Builds on :func:`normalize_url` (drops tracking params and fragments, trims
+    trailing slashes) and lowercases the result for the historically
+    case-insensitive comparison used by the topic ledgers.
+    """
+    if not url:
+        return ""
+    return normalize_url(str(url)).lower()
+
