@@ -13,7 +13,7 @@ def run_case_study_pipeline(
     topic_memory: dict | None = None,
 ) -> dict:
     memory = topic_memory or {"recent_outputs": []}
-    pool = build_case_pool(materials, topic_memory=memory)
+    pool = build_case_pool(materials, topic_memory=memory, workspace_dir=workspace_dir)
     candidates = pool["candidates"]
     ranked = rank_case_candidates(candidates) if candidates else []
     # ── URL-level dedup: drop candidates whose source URL was used recently

@@ -76,8 +76,10 @@ def test_ranking_prefers_more_checkable_evidence(monkeypatch):
         summary="38% and 21% and 4x and $12 and 90%",
         content="deployed and measured after go live",
     )
-    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7: [])
-    monkeypatch.setattr(tp, "_load_recent_source_urls", lambda topics, days=7: set())
+    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7, workspace_dir=None: [])
+    monkeypatch.setattr(
+        tp, "_load_recent_source_urls", lambda topics, days=7, workspace_dir=None: set()
+    )
     monkeypatch.setattr(tp, "_llm_rank_executive_value", lambda c, model="m": {})
     result = tp.select_candidates([weak, strong], n=1)
     assert result["selected"][0]["title"] == "Strong evidence"
@@ -90,9 +92,9 @@ def test_substitute_scan_is_bounded_and_recorded(monkeypatch):
         _material("Substitute one", "c1", summary="21% measured after deployment"),
         _material("Substitute two", "c2", summary="4x cost savings measured"),
     ]
-    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7: [])
+    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7, workspace_dir=None: [])
     monkeypatch.setattr(
-        tp, "_load_recent_source_urls", lambda topics, days=7: {recent_url}
+        tp, "_load_recent_source_urls", lambda topics, days=7, workspace_dir=None: {recent_url}
     )
     monkeypatch.setattr(tp, "_llm_rank_executive_value", lambda c, model="m": {})
     result = tp.select_candidates(candidates, n=1, scan_limit=2)
@@ -110,9 +112,13 @@ def test_model_failure_keeps_deterministic_dedup_and_marks_unverified(monkeypatc
     ]
     # Recent title is still deduped deterministically even when the model is down.
     monkeypatch.setattr(
-        tp, "_load_recent_topics", lambda days=7: [{"title": "Fresh topic", "digest": "d"}]
+        tp,
+        "_load_recent_topics",
+        lambda days=7, workspace_dir=None: [{"title": "Fresh topic", "digest": "d"}],
     )
-    monkeypatch.setattr(tp, "_load_recent_source_urls", lambda topics, days=7: set())
+    monkeypatch.setattr(
+        tp, "_load_recent_source_urls", lambda topics, days=7, workspace_dir=None: set()
+    )
     monkeypatch.setattr(tp, "_llm_rank_executive_value", lambda c, model="m": {})
     monkeypatch.setattr(tp, "_llm_judge_topic_similar_verbose", lambda *a, **k: (False, False))
     result = tp.select_candidates(candidates, n=1)
@@ -136,8 +142,10 @@ def test_selection_records_referenced_history(monkeypatch):
         _material("Fresh topic", "c1", summary="38% deployed"),
         _material("Fresh topic two", "c2", summary="21% measured after deployment"),
     ]
-    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7: history)
-    monkeypatch.setattr(tp, "_load_recent_source_urls", lambda topics, days=7: set())
+    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7, workspace_dir=None: history)
+    monkeypatch.setattr(
+        tp, "_load_recent_source_urls", lambda topics, days=7, workspace_dir=None: set()
+    )
     monkeypatch.setattr(tp, "_llm_rank_executive_value", lambda c, model="m": {})
     monkeypatch.setattr(tp, "_llm_judge_topic_similar_verbose", lambda *a, **k: (False, True))
     result = tp.select_candidates(candidates, n=1)
@@ -150,8 +158,10 @@ def test_selection_records_referenced_history(monkeypatch):
 
 
 def test_pipeline_persists_decisions_and_rejection_counts(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7: [])
-    monkeypatch.setattr(tp, "_load_recent_source_urls", lambda topics, days=7: set())
+    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7, workspace_dir=None: [])
+    monkeypatch.setattr(
+        tp, "_load_recent_source_urls", lambda topics, days=7, workspace_dir=None: set()
+    )
     monkeypatch.setattr(tp, "_llm_rank_executive_value", lambda c, model="m": {})
     materials = [
         _material("Evidence A", "c1", summary="38% deployed and measured"),
@@ -198,8 +208,10 @@ def _two_evidence_materials():
     ],
 )
 def test_daily_status_from_qualified_finals(tmp_path, monkeypatch, codes, expected_status, expected_qualified):
-    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7: [])
-    monkeypatch.setattr(tp, "_load_recent_source_urls", lambda topics, days=7: set())
+    monkeypatch.setattr(tp, "_load_recent_topics", lambda days=7, workspace_dir=None: [])
+    monkeypatch.setattr(
+        tp, "_load_recent_source_urls", lambda topics, days=7, workspace_dir=None: set()
+    )
     monkeypatch.setattr(tp, "_llm_rank_executive_value", lambda c, model="m": {})
     _writer_with_codes(monkeypatch, codes)
     job = runtime_module.run_article_daily(

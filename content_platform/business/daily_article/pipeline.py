@@ -40,7 +40,7 @@ def run_daily_article_pipeline(
         - model_available (whether the semantic topic model responded)
     """
     memory = topic_memory or {"recent_outputs": []}
-    pool = build_article_pool(materials, topic_memory=memory)
+    pool = build_article_pool(materials, topic_memory=memory, workspace_dir=workspace_dir)
     candidates = pool["candidates"]
     pool_rejected = pool.get("rejected", [])
     dataset_dir = workspace_dir / "platform" / "datasets" / date_str
@@ -74,7 +74,7 @@ def run_daily_article_pipeline(
             "status": "failed",
         }
 
-    selection = select_candidates(candidates, n=article_count)
+    selection = select_candidates(candidates, n=article_count, workspace_dir=workspace_dir)
     selections = selection["selected"]
     decisions = selection["decisions"]
     referenced_history = selection["referenced_history"]

@@ -57,10 +57,10 @@ _IMPLEMENTATION_MARKERS = (
 )
 
 
-def _used_cluster_ids(days: int = 7) -> set[str]:
+def _used_cluster_ids(days: int = 7, workspace_dir: Path | None = None) -> set[str]:
     """Read recently used article clusters from the article-only ledger."""
-    workspace_dir = Path(__file__).resolve().parent.parent.parent
-    return recent_cluster_ids(workspace_dir, "article", days=days)
+    root = Path(workspace_dir) if workspace_dir else Path(__file__).resolve().parent.parent.parent
+    return recent_cluster_ids(root, "article", days=days)
 
 
 def _recent_cluster_ids(topic_memory: dict) -> set[str]:
@@ -133,9 +133,19 @@ def _is_ai_safety_topic(material: dict) -> bool:
     return False
 
 
-def build_article_pool(materials: list[dict], topic_memory: dict) -> dict:
-    """Build the candidate pool with an evidence record and rejection reasons."""
-    recent_clusters = _recent_cluster_ids(topic_memory) | _used_cluster_ids(days=7)
+def build_article_pool(
+    materials: list[dict],
+    topic_memory: dict,
+    workspace_dir: Path | None = None,
+) -> dict:
+    """Build the candidate pool with an evidence record and rejection reasons.
+
+    Diversity is checked only against the article-only ledger in
+    ``workspace_dir`` (the shared cross-type view stays URL/content-hash based).
+    """
+    recent_clusters = _recent_cluster_ids(topic_memory) | _used_cluster_ids(
+        days=7, workspace_dir=workspace_dir
+    )
     candidates: list[dict] = []
     rejected: list[dict] = []
 

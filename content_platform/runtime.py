@@ -425,9 +425,15 @@ def run_collect_daily(
             raw_materials.extend(load_blog_materials(date_str))
             raw_materials.extend(load_consulting_materials(date_str))
             raw_materials.extend(load_case_materials(date_str))
-        curated_materials = _curate_materials(raw_materials, date_str=date_str, workspace_dir=workspace_dir)
-        article_pool = build_article_pool(curated_materials, topic_memory={"recent_outputs": []})
-        case_pool = build_case_pool(curated_materials, topic_memory={"recent_outputs": []})
+        curated_materials = _curate_materials(
+            raw_materials, date_str=date_str, workspace_dir=resolved_workspace
+        )
+        article_pool = build_article_pool(
+            curated_materials, topic_memory={"recent_outputs": []}, workspace_dir=resolved_workspace
+        )
+        case_pool = build_case_pool(
+            curated_materials, topic_memory={"recent_outputs": []}, workspace_dir=resolved_workspace
+        )
 
         write_json(paths.ingest_raw_dir(date_str) / "materials.json", raw_materials)
         write_json(paths.normalize_dir(date_str) / "materials.json", curated_materials)
@@ -891,12 +897,16 @@ def record_case_recent_topic(
     if not items:
         return
     source_urls = []
+    cluster_ids: list[str] = []
     title = ""
     digest = ""
     for m in items:
         u = m.get("canonical_url") or m.get("url") or m.get("normalized_url", "")
         if u:
             source_urls.append(u)
+        cluster_id = (m.get("dedup") or {}).get("cluster_id")
+        if cluster_id and cluster_id not in cluster_ids:
+            cluster_ids.append(cluster_id)
         if not title:
             title = m.get("title", "") or ""
         if not digest:
@@ -910,7 +920,9 @@ def record_case_recent_topic(
         "date": _date.today().isoformat(),
         "output_dir": out_dir or str(Path(materials_file).parent if materials_file else ""),
         "source_urls": source_urls[:5],
-        "cluster_ids": [],
+        # Comparable topic identifiers: the case pool compares candidates against
+        # case history ONLY (article diversity is judged separately).
+        "cluster_ids": cluster_ids,
     })
     print(f"  📌 Case topic recorded separately: {source_urls[0][:60]}")
 

@@ -11,9 +11,10 @@ from content_platform.recent_topics import recent_source_urls, recent_topics
 WORKSPACE_DIR = Path(__file__).resolve().parents[3]
 
 
-def _load_recent_topics(days: int = 7) -> list[dict]:
+def _load_recent_topics(days: int = 7, workspace_dir: Path | None = None) -> list[dict]:
     """Load article-only topic history; case topics live in their own ledger."""
-    return recent_topics(WORKSPACE_DIR, "article", days=days)
+    root = Path(workspace_dir) if workspace_dir else WORKSPACE_DIR
+    return recent_topics(root, "article", days=days)
 
 
 def _referenced_history(recent_topics: list[dict], limit: int = 20) -> list[dict]:
@@ -103,9 +104,12 @@ def _llm_judge_topic_similar(
     )[0]
 
 
-def _load_recent_source_urls(recent_topics: list[dict], days: int = 7) -> set[str]:
+def _load_recent_source_urls(
+    recent_topics: list[dict], days: int = 7, workspace_dir: Path | None = None
+) -> set[str]:
     """Collect cross-format source URLs while keeping topic histories separate."""
-    recent_urls = recent_source_urls(WORKSPACE_DIR, days=days)
+    root = Path(workspace_dir) if workspace_dir else WORKSPACE_DIR
+    recent_urls = recent_source_urls(root, days=days)
     for t in recent_topics:
         for url in t.get("source_urls", []):
             recent_urls.add(url.rstrip("/"))
@@ -132,6 +136,7 @@ def select_candidates(
     topic_diversity_days: int = 7,
     model: str = "deepseek-flash",
     scan_limit: int | None = None,
+    workspace_dir: Path | None = None,
 ) -> dict:
     """Evidence-led, explainable selection with recorded rejection reasons.
 
@@ -155,9 +160,11 @@ def select_candidates(
             "referenced_history": [],
         }
 
-    recent_topics = _load_recent_topics(days=topic_diversity_days)
+    recent_topics = _load_recent_topics(days=topic_diversity_days, workspace_dir=workspace_dir)
     recent_titles = {t.get("title", "") for t in recent_topics}
-    recent_source_url_set = _load_recent_source_urls(recent_topics, days=topic_diversity_days)
+    recent_source_url_set = _load_recent_source_urls(
+        recent_topics, days=topic_diversity_days, workspace_dir=workspace_dir
+    )
     referenced_history = _referenced_history(recent_topics)
 
     sorted_candidates = sorted(candidates, key=_evidence_rank_key, reverse=True)
@@ -301,10 +308,15 @@ def pick_top_n_clusters(
     n: int = 2,
     topic_diversity_days: int = 7,
     model: str = "deepseek-flash",
+    workspace_dir: Path | None = None,
 ) -> list[dict]:
     """Backward-compatible list-returning wrapper around select_candidates."""
     return select_candidates(
-        candidates, n=n, topic_diversity_days=topic_diversity_days, model=model
+        candidates,
+        n=n,
+        topic_diversity_days=topic_diversity_days,
+        model=model,
+        workspace_dir=workspace_dir,
     )["selected"]
 
 
