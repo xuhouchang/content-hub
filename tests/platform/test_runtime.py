@@ -22,7 +22,7 @@ def test_collect_daily_writes_job_file(tmp_path: Path):
             {
                 "url": "https://example.com/adoption",
                 "title": "Why enterprise AI adoption stalls",
-                "summary": "workflow redesign and manager incentives",
+                "summary": "workflow redesign and manager incentives; 38% faster after deployment",
                 "content_text": LONG_ARTICLE_TEXT,
                 "source_type": "rss",
                 "source_name": "Example Feed",
@@ -79,6 +79,7 @@ def test_article_daily_writes_selection_artifact(tmp_path: Path):
             },
             {
                 "title": "Workflow redesign in support ops",
+                "summary": "after deployment, automation deflected 38% of tickets",
                 "editorial_fit_score": 0.9,
                 "novelty_score": 0.7,
                 "dedup": {"cluster_id": "c2"},
@@ -179,7 +180,7 @@ def test_article_daily_uses_collect_dataset_when_materials_not_provided(tmp_path
             {
                 "url": "https://example.com/adoption",
                 "title": "Why enterprise AI adoption stalls",
-                "summary": "workflow redesign and manager incentives",
+                "summary": "workflow redesign and manager incentives; 38% faster after deployment",
                 "content_text": LONG_ARTICLE_TEXT,
                 "source_type": "rss",
                 "source_name": "Example Feed",
@@ -193,7 +194,9 @@ def test_article_daily_uses_collect_dataset_when_materials_not_provided(tmp_path
 
     result = run_article_daily(date_str="2026-06-03", workspace_dir=tmp_path)
 
-    assert result["status"] == "success"
+    # One candidate -> one qualified final draft -> partial under M2 semantics.
+    assert result["status"] == "partial"
+    assert result["artifacts"]["qualified_count"] == 1
 
 
 def test_case_daily_uses_collect_dataset_when_materials_not_provided(tmp_path: Path, monkeypatch):
@@ -243,6 +246,7 @@ def test_article_daily_invokes_legacy_writer_with_materials_file(tmp_path: Path,
         materials=[
             {
                 "title": "Workflow redesign in support ops",
+                "summary": "after deployment, automation deflected 38% of tickets",
                 "editorial_fit_score": 0.9,
                 "novelty_score": 0.7,
                 "dedup": {"cluster_id": "c2"},
@@ -253,7 +257,7 @@ def test_article_daily_invokes_legacy_writer_with_materials_file(tmp_path: Path,
         ],
     )
 
-    assert result["status"] == "success"
+    assert result["status"] == "partial"  # single article -> partial (M2)
     assert any("write_article.py" in part for part in calls[0])
     assert "--materials" in calls[0]
 
@@ -406,6 +410,7 @@ def test_article_daily_persists_writer_logs_and_return_code(tmp_path: Path, monk
         materials=[
             {
                 "title": "Workflow redesign in support ops",
+                "summary": "after deployment, automation deflected 38% of tickets",
                 "editorial_fit_score": 0.9,
                 "novelty_score": 0.7,
                 "dedup": {"cluster_id": "c2"},
@@ -417,7 +422,7 @@ def test_article_daily_persists_writer_logs_and_return_code(tmp_path: Path, monk
     )
 
     job_dir = tmp_path / "platform" / "jobs" / "2026-06-03" / "article-daily"
-    assert result["status"] == "success"
+    assert result["status"] == "partial"  # single article -> partial (M2)
     assert result["artifacts"]["writer_returncode"] == 0
     assert Path(result["artifacts"]["writer_stdout_log"]).read_text(encoding="utf-8") == "writer ok"
     assert Path(result["artifacts"]["writer_stderr_log"]).read_text(encoding="utf-8") == "warning line"

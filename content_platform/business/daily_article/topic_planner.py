@@ -5,6 +5,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Optional
+from content_platform.datasets.article_pool import extract_candidate_evidence
 from content_platform.recent_topics import recent_source_urls, recent_topics
 
 WORKSPACE_DIR = Path(__file__).resolve().parents[3]
@@ -15,18 +16,35 @@ def _load_recent_topics(days: int = 7) -> list[dict]:
     return recent_topics(WORKSPACE_DIR, "article", days=days)
 
 
-def _llm_judge_topic_similar(
+def _referenced_history(recent_topics: list[dict], limit: int = 20) -> list[dict]:
+    """Compact, secret-free view of the history a selection decision consulted."""
+    return [
+        {
+            "title": str(topic.get("title", "")),
+            "date": str(topic.get("date", "")),
+            "source_urls": [
+                str(url).rstrip("/").lower()
+                for url in (topic.get("source_urls") or [])
+            ][:5],
+        }
+        for topic in recent_topics[:limit]
+    ]
+
+
+def _llm_judge_topic_similar_verbose(
     new_title: str,
     new_digest: Optional[str],
     recent_topics: list[dict],
     model: str = "deepseek-flash",
-) -> bool:
+) -> tuple[bool, bool]:
     """Ask LLM whether new_title+new_digest is too similar to any recent topic.
 
-    Returns True if similar (should be filtered out), False otherwise.
+    Returns ``(similar, model_available)``. On any model failure availability is
+    False so callers can record an explicit ``unverified`` semantic judgment
+    instead of silently passing the candidate.
     """
     if not recent_topics:
-        return False
+        return False, True
 
     # Build recent topics summary
     recent_lines = []
@@ -66,11 +84,23 @@ def _llm_judge_topic_similar(
     # Defensive: call_model may return None on empty content / retry exhaustion.
     # Never call .strip() on a None — return a conservative verdict instead.
     if resp is None or not resp.strip():
-        print("  ⚠️ LLM topic check returned empty/None; treating as DISTINCT "
+        print("  ⚠️ LLM topic check returned empty/None; semantic judgment unverified "
               "(URL/title dedup already applied)")
-        return False
+        return False, False
     cleaned = re.sub(r"[^A-Z]", "", resp.strip().upper())
-    return cleaned == "REPEAT"
+    return cleaned == "REPEAT", True
+
+
+def _llm_judge_topic_similar(
+    new_title: str,
+    new_digest: str | None,
+    recent_topics: list[dict],
+    model: str = "deepseek-flash",
+) -> bool:
+    """Backward-compatible boolean wrapper (see _llm_judge_topic_similar_verbose)."""
+    return _llm_judge_topic_similar_verbose(
+        new_title, new_digest, recent_topics, model=model
+    )[0]
 
 
 def _load_recent_source_urls(recent_topics: list[dict], days: int = 7) -> set[str]:
@@ -82,46 +112,60 @@ def _load_recent_source_urls(recent_topics: list[dict], days: int = 7) -> set[st
     return recent_urls
 
 
-def pick_top_n_clusters(
+def _evidence_rank_key(candidate: dict) -> tuple:
+    """Explainable ranking: evidence first, then editorial fit and novelty."""
+    evidence = candidate.get("candidate_evidence")
+    if not evidence:
+        evidence = extract_candidate_evidence(candidate)
+    facts = len(evidence.get("checkable_facts") or [])
+    implementation = len(evidence.get("implementation_details") or [])
+    return (
+        min(facts, 5) + (1 if implementation else 0),
+        candidate.get("editorial_fit_score", 0.0),
+        candidate.get("novelty_score", 0.0),
+    )
+
+
+def select_candidates(
     candidates: list[dict],
     n: int = 2,
     topic_diversity_days: int = 7,
     model: str = "deepseek-flash",
-) -> list[dict]:
-    """Pick the top N cluster leaders, filtering out topics similar to recent articles.
+    scan_limit: int | None = None,
+) -> dict:
+    """Evidence-led, explainable selection with recorded rejection reasons.
 
-    Applies three layers of dedup:
-      1. URL-level: skip candidates whose canonical_url appeared in recent articles.
-      2. Title-level: skip exact title matches.
-      3. Semantic-level: LLM judges whether the topic is substantially the same.
+    Returns ``{"selected", "decisions", "model_available", "scanned",
+    "referenced_history"}``. The scan is bounded: the evidence shortlist plus a
+    finite number of already-scored substitutes (fresh cross-day material is
+    already merged into ``candidates`` upstream by ``_load_dataset_candidates``).
+    A weak opinion piece is never promoted to fill a slot — the pool already
+    rejected no-evidence material.
 
-    Args:
-        candidates: Full list of candidate materials (from article_pool).
-        n: Number of clusters to select.
-        topic_diversity_days: Days of history to check for topic similarity.
-        model: LLM model for similarity judgment.
-
-    Returns:
-        List of selected materials (1 per cluster), ordered by editorial_fit_score desc.
+    Deterministic URL/title dedup is always applied. The semantic judgment is
+    recorded as ``semantic_unverified`` when the model is unavailable, so a
+    degradation is visible rather than silently passing.
     """
     if not candidates:
-        return []
+        return {
+            "selected": [],
+            "decisions": [],
+            "model_available": True,
+            "scanned": 0,
+            "referenced_history": [],
+        }
 
     recent_topics = _load_recent_topics(days=topic_diversity_days)
     recent_titles = {t.get("title", "") for t in recent_topics}
     recent_source_url_set = _load_recent_source_urls(recent_topics, days=topic_diversity_days)
+    referenced_history = _referenced_history(recent_topics)
 
-    # Sort candidates by editorial_fit_score DESC
-    sorted_candidates = sorted(
-        candidates,
-        key=lambda m: (m.get("editorial_fit_score", 0.0), m.get("novelty_score", 0.0)),
-        reverse=True,
-    )
+    sorted_candidates = sorted(candidates, key=_evidence_rank_key, reverse=True)
 
     # ── 段位重排：对 top-K 候选做决策者洞察排序 ──
     # 素材分高（执行细节丰富）≠ 段位高（面向老板的普适洞察）。
-    # 先按 editorial_fit 取 top-K 个不同 cluster，再用 LLM 按 executive
-    # value 重排，让"能升维"的选题优先于"细节最丰富"的选题。
+    # 先按证据取 top-K 个不同 cluster，再用 LLM 按 executive value 重排，
+    # 让"能升维"的选题优先于"细节最丰富"的选题。
     top_k = 8
     top_candidates: list[dict] = []
     seen: set[str] = set()
@@ -143,21 +187,22 @@ def pick_top_n_clusters(
                 reverse=True,
             )
             print(f"  🎯 Executive-value ranking applied to {len(top_candidates)} candidates")
-            for m in top_candidates:
-                url = m.get("canonical_url", "") or m.get("url", "")
-                print(f"    • {exec_scores.get(url, 0.0):.1f} — {m.get('title', '')[:55]}")
         else:
-            print("  ⚠️ Executive-value ranking unavailable; using editorial_fit order")
+            print("  ⚠️ Executive-value ranking unavailable; using evidence order")
 
-    # Semantic rejections in the first shortlist should not end selection when
-    # good candidates remain. Keep the LLM check bounded to avoid a large burst
-    # of per-candidate calls on the cross-day pool.
+    # Rejected candidates must not end selection when qualified substitutes
+    # remain. Keep the semantic check bounded to avoid a large burst of
+    # per-candidate calls on the cross-day pool.
     shortlisted_ids = {id(m) for m in top_candidates}
     remaining = [m for m in sorted_candidates if id(m) not in shortlisted_ids]
-    candidates_to_check = (top_candidates + remaining)[:max(top_k + n * 2, n)]
+    if scan_limit is None:
+        scan_limit = max(top_k + n * 2, n)
+    candidates_to_check = (top_candidates + remaining)[:scan_limit]
 
     selected: list[dict] = []
+    decisions: list[dict] = []
     seen_clusters: set[str] = set()
+    model_available = True
 
     for m in candidates_to_check:
         if len(selected) >= n:
@@ -171,27 +216,70 @@ def pick_top_n_clusters(
         title = m.get("title", "")
         digest = m.get("summary", "")
         candidate_url = (m.get("canonical_url", "") or m.get("url", "")).rstrip("/")
+        record = {"url": candidate_url, "title": title, "cluster_id": cluster_id}
 
-        # ── Layer 1: URL-level dedup ──
+        # ── Layer 1: URL-level dedup (deterministic) ──
         if recent_source_url_set and candidate_url.lower() in recent_source_url_set:
-            print(f"  ⏭️  Skipping (same source URL used recently): {title[:50]}")
+            decisions.append({
+                **record,
+                "decision": "rejected",
+                "reason": "recent_source_url",
+                "history_ref": {"match": "source_url", "url": candidate_url.lower()},
+            })
             continue
 
-        # ── Layer 2: exact title match ──
+        # ── Layer 2: exact title match (deterministic) ──
         if title in recent_titles:
+            decisions.append({
+                **record,
+                "decision": "rejected",
+                "reason": "recent_title",
+                "history_ref": {"match": "title", "title": title},
+            })
             continue
 
         # ── Layer 3: semantic similarity check ──
         if recent_topics:
             try:
-                similar = _llm_judge_topic_similar(title, digest, recent_topics, model=model)
-                if similar:
-                    print(f"  ⏭️  Skipping (topic too similar to recent): {title[:50]}")
-                    continue
+                similar, available = _llm_judge_topic_similar_verbose(
+                    title, digest, recent_topics, model=model
+                )
             except Exception as e:
                 print(f"  ⚠️ LLM topic check failed for '{title[:30]}': {e}")
-                # On failure, still include if URL-level dedup passed
+                similar, available = False, False
+            if not available:
+                model_available = False
+                decisions.append({
+                    **record,
+                    "decision": "selected",
+                    "reason": "semantic_unverified",
+                    "history_ref": {
+                        "match": "semantic",
+                        "verified": False,
+                        "checked_topics": len(recent_topics),
+                    },
+                })
+                selected.append(m)
+                continue
+            if similar:
+                decisions.append({
+                    **record,
+                    "decision": "rejected",
+                    "reason": "semantic_repeat",
+                    "history_ref": {
+                        "match": "semantic",
+                        "verified": True,
+                        "checked_topics": len(recent_topics),
+                    },
+                })
+                continue
 
+        decisions.append({
+            **record,
+            "decision": "selected",
+            "reason": "qualified",
+            "history_ref": {"match": "none"},
+        })
         selected.append(m)
 
     print(f"  Selected {len(selected)}/{n} clusters from {len(candidates)} candidates")
@@ -199,7 +287,25 @@ def pick_top_n_clusters(
         cluster = s.get("dedup", {}).get("cluster_id", "?")
         print(f"    - [{cluster}] {s.get('title', '')[:60]}")
 
-    return selected
+    return {
+        "selected": selected,
+        "decisions": decisions,
+        "model_available": model_available,
+        "scanned": len(candidates_to_check),
+        "referenced_history": referenced_history,
+    }
+
+
+def pick_top_n_clusters(
+    candidates: list[dict],
+    n: int = 2,
+    topic_diversity_days: int = 7,
+    model: str = "deepseek-flash",
+) -> list[dict]:
+    """Backward-compatible list-returning wrapper around select_candidates."""
+    return select_candidates(
+        candidates, n=n, topic_diversity_days=topic_diversity_days, model=model
+    )["selected"]
 
 
 def _llm_rank_executive_value(candidates: list[dict], model: str = "deepseek-flash") -> dict[str, float]:

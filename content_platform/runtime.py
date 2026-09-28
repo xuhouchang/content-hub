@@ -691,30 +691,57 @@ def run_article_daily(
         "candidate_count": len(result.get("candidates", [])),
         "selected_count": len(result.get("selections", [])),
         "writer_exit_codes": writer_all_exit_codes,
+        "rejection_counts": result.get("rejection_counts", {}),
+        "semantic_model_available": result.get("model_available", True),
     }
     job["artifacts"].update(writer_artifacts)
 
-    all_success = bool(writer_all_exit_codes) and all(c == 0 for c in writer_all_exit_codes)
-    if not all_success:
-        job["status"] = (
-            "partial"
-            if any(c == 0 for c in writer_all_exit_codes) and len(writer_all_exit_codes) > 1
-            else "failed"
+    # M2: status comes from qualified FINAL articles, not from raw exit codes.
+    # 2 qualified -> success, 1 -> partial, 0 -> failed. Each state carries the
+    # rejection-count breakdown and an explicit stage reason.
+    exit_code_labels = {0: "qualified", 2: "quality_rejected", 3: "commit_incomplete"}
+    rejection_counts = dict(result.get("rejection_counts", {}))
+    qualified = 0
+    for code in writer_all_exit_codes:
+        label = exit_code_labels.get(code, "model_failure")
+        if code == 0:
+            qualified += 1
+        else:
+            rejection_counts[label] = rejection_counts.get(label, 0) + 1
+    if qualified >= 2:
+        job["status"] = "success"
+    elif qualified == 1:
+        job["status"] = "partial"
+    else:
+        job["status"] = "failed"
+
+    if not result.get("candidates"):
+        stage_reason = (
+            f"no article candidates from {len(input_materials)} pool materials "
+            f"(rejections: {result.get('rejection_counts', {})})"
         )
-    job["steps"].append({"name": "write_articles", "status": "success" if all_success else "failed"})
+    elif not result.get("selections"):
+        stage_reason = (
+            f"no selections after recent-topic filtering from "
+            f"{len(result.get('candidates', []))} candidates"
+        )
+    elif qualified == 0:
+        stage_reason = f"no qualified final drafts (exit codes: {writer_all_exit_codes})"
+    elif qualified == 1:
+        stage_reason = "only 1 qualified final draft; published as partial"
+    else:
+        stage_reason = ""
+
+    job["artifacts"]["qualified_count"] = qualified
+    job["artifacts"]["rejection_counts"] = rejection_counts
+    job["artifacts"]["stage_reason"] = stage_reason
+
+    job["steps"].append({"name": "write_articles", "status": "success" if qualified >= 2 else "failed"})
     health = record_job_result(
         resolved_workspace,
         "article-daily",
         job["status"],
-        reason=(
-            f"no article candidates from {len(input_materials)} pool materials"
-            if not result.get("candidates")
-            else f"no selections after recent-topic filtering from {len(result.get('candidates', []))} candidates"
-            if not result.get("selections")
-            else f"writer exit codes: {writer_all_exit_codes}"
-            if job["status"] != "success"
-            else ""
-        ),
+        reason=stage_reason,
     )
     job["artifacts"]["health"] = health
     store.write_job(job)

@@ -6,12 +6,14 @@ def test_article_pool_excludes_low_editorial_fit_primary_candidates():
         {
             "title": "GitHub pricing tiers",
             "editorial_fit_score": 0.2,
+            "summary": "pricing change",
             "dedup": {"cluster_id": "c1"},
             "quality": {"content_chars": 5000},
         },
         {
             "title": "AI workflow redesign in finance ops",
             "editorial_fit_score": 0.9,
+            "summary": "after deployment the agent deflected 38% of tickets",
             "dedup": {"cluster_id": "c2"},
             "quality": {"content_chars": 5000},
         },

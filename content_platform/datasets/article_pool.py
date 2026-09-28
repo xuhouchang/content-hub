@@ -1,7 +1,13 @@
-"""Build article candidate pool from curated materials."""
+"""Build article candidate pool from curated materials.
+
+M2 adds evidence-led candidacy: a candidate must carry checkable evidence
+(facts/data or implementation detail) to enter the pool. The evidence fields are
+also used for explainable ranking, instead of a new opaque numeric cutoff.
+"""
 
 import re
 from pathlib import Path
+
 from content_platform.recent_topics import recent_cluster_ids
 
 PRIMARY_TOPIC_THRESHOLD = 0.65
@@ -30,6 +36,27 @@ AI_SAFETY_EXCEPTIONS = [
     r'real\s*-?world\s+incident.*(?:technical|detailed|report)',
 ]
 
+# Fact/data signals: explicit numbers, percentages, monetary amounts, metrics.
+_FACT_PATTERN = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:%|％|percent|percentage points?|bps|"
+    r"x|times|亿|万|千|百万|billion|million|thousand|k\b|"
+    r"users?|customers?|tickets?|hours?|days?|weeks?|months?|"
+    r"人|家|个|倍)|\$\s?\d+|\d{2,}",
+    re.IGNORECASE,
+)
+
+# Implementation-detail signals: the material describes something actually done,
+# not just an opinion about the direction of travel.
+_IMPLEMENTATION_MARKERS = (
+    "implemented", "implementation", "deployed", "deployment", "rolled out",
+    "rollout", "rolled-out", "pilot", "piloted", "migrated", "migration",
+    "automated", "automation rate", "measured", "metric", "cost savings",
+    "saved", "reduced", "increased", "case study", "after go live", "go-live",
+    "上线", "部署", "落地", "实施", "试点", "迁移", "接手", "接入", "改造",
+    "节省", "提效", "降本", "复盘", "落地实践",
+)
+
+
 def _used_cluster_ids(days: int = 7) -> set[str]:
     """Read recently used article clusters from the article-only ledger."""
     workspace_dir = Path(__file__).resolve().parent.parent.parent
@@ -45,45 +72,98 @@ def _recent_cluster_ids(topic_memory: dict) -> set[str]:
     }
 
 
-def build_article_pool(materials: list[dict], topic_memory: dict) -> dict:
-    # Combine legacy in-memory cluster ids with persistent recent-topics data
-    recent_clusters = _recent_cluster_ids(topic_memory) | _used_cluster_ids(days=7)
-    candidates = [
-        material
-        for material in materials
-        if material.get("editorial_fit_score", 0.0) >= PRIMARY_TOPIC_THRESHOLD
-        and material.get("quality", {}).get("content_chars", 0) >= MIN_CONTENT_CHARS
-        and material.get("dedup", {}).get("cluster_id") not in recent_clusters
+def _candidate_text(material: dict) -> str:
+    return (material.get("summary") or "") + " " + (
+        material.get("content_text") or material.get("content") or ""
+    )
+
+
+def extract_candidate_evidence(material: dict) -> dict:
+    """Return the evidence record used for candidacy and explainable ranking."""
+    text = _candidate_text(material)[:6000]
+    facts = _FACT_PATTERN.findall(text)
+    implementation_markers = [
+        marker for marker in _IMPLEMENTATION_MARKERS if marker.lower() in text.lower()
     ]
+    quality = material.get("quality") or {}
+    content_chars = quality.get("content_chars")
+    if not isinstance(content_chars, int):
+        content_chars = len(material.get("content_text") or material.get("content") or "")
+    return {
+        "original_source": {
+            "url": material.get("canonical_url") or material.get("url") or "",
+            "source_name": material.get("source_name", ""),
+            "source_type": material.get("source_type", ""),
+        },
+        "checkable_facts": list(dict.fromkeys(facts))[:8],
+        "implementation_details": implementation_markers[:5],
+        "body_completeness": {
+            "content_chars": content_chars,
+            "min_required": MIN_CONTENT_CHARS,
+            "complete": content_chars >= MIN_CONTENT_CHARS,
+        },
+        "scoring_confidence": material.get("score_confidence", "unknown"),
+    }
 
-    # ── Stage 2: Exclude AI safety topics (with exception check) ──
-    def _is_ai_safety_topic(material: dict) -> bool:
-        """Check if material is an AI safety topic, with narrow exception list."""
-        text_to_check = (
-            (material.get("title", "") or "") + " " +
-            (material.get("summary", "") or "") + " " +
-            (material.get("canonical_url", "") or "") + " " +
-            (material.get("url", "") or "") + " " +
-            (material.get("content", "") or "")[:2000]
-        ).lower()
 
-        # Check exceptions first (narrow allowlist)
-        for exc_pattern in AI_SAFETY_EXCEPTIONS:
-            if re.search(exc_pattern, text_to_check, re.IGNORECASE):
-                return False  # Exception applies — do NOT exclude
+def _has_checkable_evidence(evidence: dict) -> bool:
+    return bool(evidence["checkable_facts"]) or bool(evidence["implementation_details"])
 
-        # Check main exclusion patterns
-        for pattern in AI_SAFETY_KEYWORDS:
-            if re.search(pattern, text_to_check, re.IGNORECASE):
-                return True  # AI safety topic — exclude
 
-        return False
+def _is_ai_safety_topic(material: dict) -> bool:
+    """Check if material is an AI safety topic, with narrow exception list."""
+    text_to_check = (
+        (material.get("title", "") or "") + " " +
+        (material.get("summary", "") or "") + " " +
+        (material.get("canonical_url", "") or "") + " " +
+        (material.get("url", "") or "") + " " +
+        (material.get("content", "") or "")[:2000]
+    ).lower()
 
-    excluded_by_safety = [m for m in candidates if _is_ai_safety_topic(m)]
-    if excluded_by_safety:
-        print(f"  🚫 Excluded {len(excluded_by_safety)} AI safety candidate(s):")
-        for m in excluded_by_safety[:5]:
-            print(f"     • {m.get('title', '')[:60]}")
-    candidates = [m for m in candidates if not _is_ai_safety_topic(m)]
+    # Check exceptions first (narrow allowlist)
+    for exc_pattern in AI_SAFETY_EXCEPTIONS:
+        if re.search(exc_pattern, text_to_check, re.IGNORECASE):
+            return False  # Exception applies — do NOT exclude
 
-    return {"candidates": candidates}
+    # Check main exclusion patterns
+    for pattern in AI_SAFETY_KEYWORDS:
+        if re.search(pattern, text_to_check, re.IGNORECASE):
+            return True  # AI safety topic — exclude
+
+    return False
+
+
+def build_article_pool(materials: list[dict], topic_memory: dict) -> dict:
+    """Build the candidate pool with an evidence record and rejection reasons."""
+    recent_clusters = _recent_cluster_ids(topic_memory) | _used_cluster_ids(days=7)
+    candidates: list[dict] = []
+    rejected: list[dict] = []
+
+    for material in materials:
+        title = material.get("title", "") or ""
+        if material.get("editorial_fit_score", 0.0) < PRIMARY_TOPIC_THRESHOLD:
+            rejected.append({"title": title, "reason": "below_editorial_threshold"})
+            continue
+        if material.get("quality", {}).get("content_chars", 0) < MIN_CONTENT_CHARS:
+            rejected.append({"title": title, "reason": "insufficient_body"})
+            continue
+        if material.get("dedup", {}).get("cluster_id") in recent_clusters:
+            rejected.append({"title": title, "reason": "recent_cluster"})
+            continue
+
+        # ── Stage 2: Exclude AI safety topics (with exception check) ──
+        if _is_ai_safety_topic(material):
+            rejected.append({"title": title, "reason": "ai_safety_topic"})
+            continue
+
+        evidence = extract_candidate_evidence(material)
+        if not _has_checkable_evidence(evidence):
+            # A pure opinion piece must not enter the pool on length/score alone.
+            rejected.append({"title": title, "reason": "no_checkable_evidence"})
+            continue
+
+        enriched = dict(material)
+        enriched["candidate_evidence"] = evidence
+        candidates.append(enriched)
+
+    return {"candidates": candidates, "rejected": rejected}
