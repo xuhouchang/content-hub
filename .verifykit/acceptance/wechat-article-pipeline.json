@@ -1,0 +1,24 @@
+{
+  "id": "wechat-article-pipeline",
+  "title": "WeChat article pipeline — collected material to enqueued draft",
+  "approved": false,
+  "approval_note": "Draft acceptance for the M0 bridge. It is deliberately marked approved:false because a local bridge run is not proof of the real DeepSeek/WeChat integration. A human must review this acceptance (required steps, rules and the candidate-selection ground truth) and set approved:true before any green result is trusted. The M0 run is expected to FAIL on the unapproved ground truth.",
+  "required_steps": [
+    "wechat.material_pool",
+    "wechat.candidate_selection",
+    "wechat.queue_enqueue"
+  ],
+  "rules": {
+    "mock_count": 0,
+    "unexpected_fallback_count": 0,
+    "external_evidence_present": false
+  },
+  "allowed_fallbacks": [],
+  "business": {
+    "type": "ranking_top_n",
+    "feature_id": "wechat.candidate_selection",
+    "ground_truth": "ground-truth/candidate-selection.json",
+    "top_n": 2,
+    "min_matches": 1
+  }
+}

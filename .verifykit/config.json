@@ -1,0 +1,21 @@
+{
+  "environment": "development",
+  "mock_allowed": false,
+  "pipeline": ".verifykit/bridge/pipeline.mjs",
+  "pipeline_export": "runPipeline",
+  "production_readiness": {
+    "observability": false,
+    "rollback": false
+  },
+  "protected_paths": [
+    ".verifykit/bridge",
+    ".verifykit/config.json",
+    ".verifykit/acceptance",
+    ".verifykit/ground-truth",
+    ".verifykit/policies"
+  ],
+  "dependencies": {},
+  "feature_flags": {
+    "WECHAT_ARTICLE_PIPELINE": true
+  }
+}

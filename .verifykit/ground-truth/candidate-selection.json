@@ -1,0 +1,10 @@
+{
+  "id": "wechat-candidate-selection",
+  "approved": false,
+  "approval_note": "PENDING HUMAN APPROVAL. Synthetic bridge-fixture reference: the human-preferred candidate index is 1 (the 'AI landing stalls' fixture). It exists only to keep the M0 Golden Path approval-gated and must not be treated as real editorial ground truth. Replace it with human-labeled selections and set approved:true to allow a passing run.",
+  "input": {
+    "note": "1-based indices of the deterministic bridge fixture candidates",
+    "candidate_count": 2
+  },
+  "preferred": [1]
+}

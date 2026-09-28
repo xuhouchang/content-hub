@@ -1,0 +1,42 @@
+name: VerifyKit
+
+# This repository is Python (content pipeline). The VerifyKit CLI is a Node
+# tool, and its generated default workflow assumed an npm project, which does
+# not fit here. This workflow installs the Python dependencies, runs the offline
+# test suite and lint, then runs the VerifyKit `check` gate.
+#
+# The Golden Path (`verifykit run`) is intentionally NOT wired here yet: it
+# requires the VerifyKit harness to be present on the runner (it is not a
+# dependency of this repository). Once VerifyKit is vendored or checked out as a
+# sibling directory, uncomment the Golden Path step below.
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest ruff
+      - name: Lint (changed scope)
+        run: ruff check content_platform write_article.py publish_queue.py publish_worker.py platform_cli.py
+      - name: Offline tests
+        run: python -m pytest -q tests/platform tests/test_publish_pipeline.py tests/test_quality_fix.py tests/test_quality_llm_judge.py
+      # VerifyKit is invoked from a sibling checkout of the harness. Set
+      # VERIFYKIT_DIR on the runner (or vendor it) before enabling these steps.
+      - name: VerifyKit check
+        if: ${{ env.VERIFYKIT_DIR != '' }}
+        run: node "$VERIFYKIT_DIR/bin/verifykit.mjs" check --project "$GITHUB_WORKSPACE"
+      # - name: VerifyKit Golden Path (approval-gated)
+      #   if: ${{ env.VERIFYKIT_DIR != '' }}
+      #   run: node "$VERIFYKIT_DIR/bin/verifykit.mjs" run wechat-article-pipeline --project "$GITHUB_WORKSPACE"

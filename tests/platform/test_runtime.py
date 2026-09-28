@@ -26,6 +26,8 @@ def test_collect_daily_writes_job_file(tmp_path: Path):
                 "content_text": LONG_ARTICLE_TEXT,
                 "source_type": "rss",
                 "source_name": "Example Feed",
+                "editorial_fit_score": 0.85,
+                "quality": {"content_chars": len(LONG_ARTICLE_TEXT)},
                 "execution_detail_score": 0.8,
                 "novelty_score": 0.7,
             },
@@ -181,6 +183,8 @@ def test_article_daily_uses_collect_dataset_when_materials_not_provided(tmp_path
                 "content_text": LONG_ARTICLE_TEXT,
                 "source_type": "rss",
                 "source_name": "Example Feed",
+                "editorial_fit_score": 0.85,
+                "quality": {"content_chars": len(LONG_ARTICLE_TEXT)},
                 "execution_detail_score": 0.8,
                 "novelty_score": 0.7,
             }
@@ -211,6 +215,8 @@ def test_case_daily_uses_collect_dataset_when_materials_not_provided(tmp_path: P
                 "content_text": LONG_ARTICLE_TEXT,
                 "source_type": "rss",
                 "source_name": "Example Feed",
+                "editorial_fit_score": 0.9,
+                "quality": {"content_chars": len(LONG_ARTICLE_TEXT)},
                 "execution_detail_score": 0.9,
                 "novelty_score": 0.7,
             }
@@ -299,6 +305,10 @@ def test_collect_daily_uses_source_collectors_when_materials_not_provided(tmp_pa
             }
         ]
 
+    def fake_reddit(date_str):
+        calls.append(("reddit", date_str))
+        return []
+
     def fake_blogs(date_str):
         calls.append(("blogs", date_str))
         return [
@@ -323,6 +333,7 @@ def test_collect_daily_uses_source_collectors_when_materials_not_provided(tmp_pa
         return []
 
     monkeypatch.setattr(runtime_module, "load_rss_materials", fake_rss)
+    monkeypatch.setattr(runtime_module, "load_reddit_materials", fake_reddit)
     monkeypatch.setattr(runtime_module, "load_blog_materials", fake_blogs)
     monkeypatch.setattr(runtime_module, "load_consulting_materials", fake_consulting)
     monkeypatch.setattr(runtime_module, "load_case_materials", fake_cases)
@@ -335,6 +346,7 @@ def test_collect_daily_uses_source_collectors_when_materials_not_provided(tmp_pa
     assert result["status"] == "success"
     assert calls == [
         ("rss", "2026-06-03"),
+        ("reddit", "2026-06-03"),
         ("blogs", "2026-06-03"),
         ("consulting", "2026-06-03"),
         ("cases", "2026-06-03"),

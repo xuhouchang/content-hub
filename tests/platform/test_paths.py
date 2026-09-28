@@ -24,8 +24,19 @@ def test_platform_cli_exposes_expected_jobs():
     assert args.date == "2026-06-03"
 
 
-def test_platform_cli_main_dispatches_collect_job(tmp_path: Path):
+def test_platform_cli_main_dispatches_collect_job(tmp_path: Path, monkeypatch):
+    import content_platform.runtime as runtime_module
     from platform_cli import main
+
+    # Offline: no live source collectors during the CLI dispatch test.
+    for loader in (
+        "load_rss_materials",
+        "load_reddit_materials",
+        "load_blog_materials",
+        "load_consulting_materials",
+        "load_case_materials",
+    ):
+        monkeypatch.setattr(runtime_module, loader, lambda date_str: [])
 
     exit_code = main(
         [

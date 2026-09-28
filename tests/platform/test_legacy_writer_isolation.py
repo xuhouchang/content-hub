@@ -7,11 +7,8 @@ import write_article
 
 def test_log_article_topic_can_skip_all_urls_registry(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(write_article, "REPORTS_DIR", tmp_path / "reports")
-    monkeypatch.setattr(
-        write_article,
-        "RECENT_TOPICS_FILE",
-        tmp_path / "wechat-articles" / "_recent_topics.json",
-    )
+    monkeypatch.setattr(write_article, "OUTPUT_BASE", tmp_path / "wechat-articles")
+    ledger = tmp_path / "wechat-articles" / "_article_topics.json"
 
     write_article._log_article_topic(
         title="Workflow redesign in support ops",
@@ -21,7 +18,7 @@ def test_log_article_topic_can_skip_all_urls_registry(tmp_path: Path, monkeypatc
         mark_source_urls=False,
     )
 
-    assert write_article.RECENT_TOPICS_FILE.exists()
+    assert ledger.exists()
     assert not (tmp_path / "reports" / "_index" / "all_urls.tsv").exists()
 
 

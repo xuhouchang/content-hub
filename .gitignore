@@ -7,6 +7,8 @@
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+.ruff_cache/
 .worktrees/
 memory/
 logs/
@@ -62,3 +64,11 @@ todos.md
 recruitment.md
 workspace_wechat_articles_recent_topics.json
 IG_PUBLISHER_*.json
+
+# VerifyKit local evidence (never commit run data)
+.verifykit/data/
+**/.verifykit/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal

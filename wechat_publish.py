@@ -233,8 +233,8 @@ class WeChatPublisher:
                     import json
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))
                     digest = meta.get("digest", "")
-                except (json.JSONDecodeError, IOError):
-                    pass
+                except (json.JSONDecodeError, IOError) as exc:
+                    print(f"  ⚠️ ignoring unreadable meta.json ({exc}): {meta_path}")
 
         # Extract title (first # heading)
         lines = content.split("\n")

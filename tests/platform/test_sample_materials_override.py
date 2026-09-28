@@ -72,9 +72,11 @@ def test_override_path_keeps_used_materials(monkeypatch, tmp_path):
 def test_override_still_applies_recent_url_dedup(monkeypatch, tmp_path):
     """Override path still drops URLs used in the past 3 days (short-window dedup)."""
     _setup(monkeypatch, tmp_path, used_url=None)
+    import datetime as _dt
+    _yesterday = (_dt.date.today() - _dt.timedelta(days=1)).isoformat()
     recent = tmp_path / "wechat-articles" / "_recent_topics.json"
     recent.write_text(json.dumps([
-        {"date": "2026-08-23", "source_urls": ["https://example.com/yesterday"]}
+        {"date": _yesterday, "source_urls": ["https://example.com/yesterday"]}
     ]), encoding="utf-8")
     materials = [
         {"url": "https://example.com/yesterday", "content": "x" * 600},

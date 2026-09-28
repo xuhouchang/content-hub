@@ -390,8 +390,8 @@ def _build_structured_material(m: dict) -> dict:
                 elif any(k in diml for k in ("结论", "insight", "key", "signal")):
                     if not key_signal:
                         key_signal = tag
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"  ⚠️ structured-tag enrichment skipped: {exc}")
 
     # ── Light heuristic extraction from the leading part of the body ──
     if not facts and content:

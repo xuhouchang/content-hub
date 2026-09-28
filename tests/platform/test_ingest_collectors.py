@@ -165,6 +165,7 @@ def test_load_blog_materials_limits_article_fetches_per_source(monkeypatch):
         [{"name": "Example Blog", "url": "https://example.com/blog"}],
     )
     monkeypatch.setattr(blogs_ingest, "load_url_registry", lambda: {})
+    monkeypatch.setattr(blogs_ingest, "MAX_ARTICLES_PER_SOURCE", 3)
     monkeypatch.setattr(blogs_ingest, "extract_page_summary", lambda html, max_chars=2000: html[:max_chars])
     monkeypatch.setattr(
         blogs_ingest,
@@ -231,17 +232,38 @@ def test_load_blog_materials_stops_after_time_budget(monkeypatch):
 
 
 def test_load_consulting_materials_returns_empty_when_not_scheduled(monkeypatch):
+    # Offline: no source config and not Monday -> nothing is fetched.
+    monkeypatch.setattr(consulting_ingest, "load_sources", lambda: {})
     monkeypatch.setattr(consulting_ingest, "is_monday", lambda: False)
 
     assert consulting_ingest.load_consulting_materials("2026-06-03") == []
 
 
 def test_load_case_materials_returns_podcast_specs_when_forced(monkeypatch):
-    monkeypatch.setattr(cases_ingest, "is_monday", lambda: False)
+    # Offline: case materials load daily from podcast RSS without network.
     monkeypatch.setattr(
         cases_ingest,
-        "PODCASTS",
-        [{"name": "Example Podcast", "url": "https://example.com/podcast"}],
+        "_get_podcast_sources",
+        lambda: {
+            "youtube_channels": [],
+            "rss_feeds": [
+                {"name": "Example Podcast", "url": "https://example.com/podcast", "max_items": 3}
+            ],
+        },
+    )
+    monkeypatch.setattr(cases_ingest, "load_url_registry", lambda: {})
+    monkeypatch.setattr(
+        cases_ingest,
+        "_fetch_podcast_rss",
+        lambda name, feed_url, max_items=3: [
+            {
+                "title": "Example Podcast",
+                "url": "https://example.com/podcast/episode-1",
+                "summary": "enterprise AI rollout",
+                "source_name": name,
+                "source_type": "podcasts",
+            }
+        ],
     )
 
     materials = cases_ingest.load_case_materials("2026-06-03", force=True)
@@ -249,4 +271,4 @@ def test_load_case_materials_returns_podcast_specs_when_forced(monkeypatch):
     assert len(materials) == 1
     assert materials[0]["title"] == "Example Podcast"
     assert materials[0]["source_type"] == "podcasts"
-    assert materials[0]["url"] == "https://example.com/podcast"
+    assert materials[0]["url"] == "https://example.com/podcast/episode-1"

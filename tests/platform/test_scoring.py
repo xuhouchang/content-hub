@@ -129,10 +129,10 @@ def test_rubric_drops_counter_intuitive_dimension():
     assert "counter_intuitive" not in SCORING_SYSTEM_PROMPT
 
 
-def test_rubric_adds_enterprise_transformation_insight():
-    assert "企业转型洞察" in SCORING_SYSTEM_PROMPT
-    assert "Enterprise Transformation Insight" in SCORING_SYSTEM_PROMPT
-    assert "enterprise_transformation_insight" in SCORING_SYSTEM_PROMPT
+def test_rubric_uses_landing_practice_insight_dimension():
+    # v6：维度2 从「企业转型洞察」收敛为「落地实践洞察」，对齐「企业AI怎么落地」主轴。
+    assert "落地实践洞察" in SCORING_SYSTEM_PROMPT
+    assert "Landing Practice Insight" in SCORING_SYSTEM_PROMPT
 
 
 def test_total_weights_sum_to_one():
@@ -149,7 +149,7 @@ def test_govsafety_must_tie_to_business_consequence():
 
 
 def test_cache_version_bumped_for_new_rubric():
-    assert SCORE_CACHE_VERSION == "v4-enterprise-transformation"
+    assert SCORE_CACHE_VERSION == "v6-landing-practice"
 
 
 # ── Insufficient-content handling: never fake score from titles ──

@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "name": "content-hub-verifykit",
+  "note": "Scoped to the WeChat article pipeline owned by the 2026-09-28 iteration. The repository root also holds unrelated legacy tooling (etf-quant, book_research, synthesize_weekly, ...) that is out of scope and would otherwise produce noise. Vendored/cache directories are excluded.",
+  "rules": [
+    {
+      "id": "no-fixture-imports",
+      "description": "Production code must not import fixtures, mocks or test data.",
+      "severity": "error"
+    },
+    {
+      "id": "no-silent-exception",
+      "description": "Empty catch blocks and empty except/pass hide failures.",
+      "severity": "error"
+    },
+    {
+      "id": "no-unified-fallback-bypass",
+      "description": "Fallbacks must go through the VerifyKit degrade mechanism.",
+      "severity": "error"
+    }
+  ],
+  "scan": [
+    "content_platform",
+    "write_article.py",
+    "publish_queue.py",
+    "publish_worker.py",
+    "platform_cli.py",
+    "polish_article.py",
+    "wechat_publish.py",
+    ".verifykit/bridge"
+  ],
+  "exclude": [
+    "**/__pycache__/**",
+    "**/.venv/**",
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/tests/**",
+    "**/.verifykit/data/**"
+  ]
+}
