@@ -185,6 +185,7 @@ class WeChatPublisher:
             fpath = os.path.join(images_dir, fname)
             try:
                 return fname, self.upload_image_as_url(fpath)
+            # verifykit-allow: no-unified-fallback-bypass per-image upload failure is logged and skipped
             except Exception as e:
                 print(f"  ⚠️ Skipping image {fname} (upload failed): {e}")
                 return fname, None

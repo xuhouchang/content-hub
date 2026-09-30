@@ -736,6 +736,7 @@ def evaluate_article_quality(
         return base
     try:
         from lib.quality_judge import evaluate_quality
+    # verifykit-allow: no-unified-fallback-bypass optional judge import degrades to an explicit rules-only review
     except Exception:
         base = check_article_quality(article_text, title=title, source_map=source_map)
         base["status"] = "rules"

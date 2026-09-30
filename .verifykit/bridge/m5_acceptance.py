@@ -299,6 +299,7 @@ def _probe_deepseek(base: Path, repo_root: Path, env: dict, transport) -> dict:
 
     try:
         payload = json.loads(raw.decode("utf-8"))
+    # verifykit-allow: no-unified-fallback-bypass unparseable JSON is a classified provider error (error_class)
     except (json.JSONDecodeError, UnicodeDecodeError):
         result["error_class"] = "unparseable_response"
         return result

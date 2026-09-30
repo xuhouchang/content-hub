@@ -60,6 +60,7 @@ def _build_tag_definitions() -> str:
     try:
         sys.path.insert(0, str(_TAG_FILE.parent.parent))
         from tag_schema import TAG_SCHEMA
+    # verifykit-allow: no-unified-fallback-bypass optional tag_schema import degrades to a visible sentinel
     except Exception:
         # Inline fallback if tag_schema not available
         return "(tag definitions unavailable)"
@@ -587,6 +588,7 @@ def _invoke_legacy_writer(script_path: Path, date_str: str, materials_file: str,
     env["IMAGE_SEARCH_DEADLINE"] = str(time.time() + 840)
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env)
+    # verifykit-allow: no-unified-fallback-bypass writer timeout is recorded as exit 124, not swallowed
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout or ""
         stderr = exc.stderr or ""

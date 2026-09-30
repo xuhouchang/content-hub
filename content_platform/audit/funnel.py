@@ -35,6 +35,7 @@ def _read_records(path: Path) -> list[dict]:
     records: list[dict] = []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
+    # verifykit-allow: no-unified-fallback-bypass read-only audit: missing/unreadable queue file yields no records
     except OSError:
         return records
     for line in lines:
