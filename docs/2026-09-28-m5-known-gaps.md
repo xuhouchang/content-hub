@@ -26,5 +26,5 @@
 
 ## D. 证据可读性限制
 
-11. **DeepSeek 细节数值未落盘 — OPEN**：请求/响应模型 ID（响应侧）、认证分类、脚本请求级耗时、实际 usage 数字只存在于脚本 stdout，VerifyKit level-1 摘要仅保存 schema/大小/哈希，事后不可恢复。不推算费用。下一次改进：让适配器把 redacted 结果单独写入忽略目录工件。
+11. **DeepSeek 细节数值未落盘 — RESOLVED**：修复后适配器把 redacted 结果**持久化**到忽略目录工件 `.verifykit/data/m5/<run-id>/deepseek/result.json`（成功与失败路径均写）。第 3 轮经再次批准的一次 DeepSeek-only 真实请求（Run ID `run_20260930152005_ca786ddb`）已落盘：`request_model_id=deepseek-flash`、`response_model_id=deepseek-flash`、`auth_class=ok`、`http_status=200`、`content_non_empty=true`、`elapsed_ms=970`、`usage={prompt_tokens:41, completion_tokens:23, total_tokens:64}`、`cost=unknown`、`provider_request_id=fa61d04c-b055-4689-9fd4-c55605d3bd4c`、`error_class=null`。该 run 显式排除微信探针（`wechat.draft_live` SKIPPED，`M5_LIVE_STEPS excludes wechat`），未触发任何微信调用。工件 schema 与 redaction 由 `tests/test_m5_acceptance.py` 离线覆盖。
 12. **一次性预算已生效 — RESOLVED**：`deepseek/request.attempted` 与 `wechat/draft.attempted` 均存在，证明每个 probe 至多一次；失败后未重试、未重跑队列。

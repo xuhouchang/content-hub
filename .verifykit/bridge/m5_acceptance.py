@@ -11,12 +11,19 @@ Two independent, at-most-once probes are available:
 * ``deepseek`` — one POST to the configured DeepSeek chat-completions endpoint
   with ``max_tokens=128``, a 30s urlopen timeout and a 64 KiB response cap. No
   retries. Only provider-issued metadata is returned: never the prompt, the full
-  reply, the credential or a raw error body.
+  reply, the credential or a raw error body. The same redacted metadata is
+  durably written to ``.verifykit/data/m5/<run-id>/deepseek/result.json`` (an
+  ignored path) on both the success and failure paths.
 * ``wechat`` — one WeChat draft creation through the real ``publish_worker``
   state machine, pointed at an isolated queue under
   ``.verifykit/data/m5/<run-id>/``. The real ``queue/pending.jsonl`` is never
   touched. A permanent cover media id is reused; image upload, dynamic cover
   generation and auto group-send are skipped.
+
+Which probes run is controlled by two gates: ``M5_LIVE_APPROVED=1`` (default
+OFF) and ``M5_LIVE_STEPS`` (a comma list, default ``"deepseek,wechat"``). A live
+step runs only when both allow it, so an approved DeepSeek-only run with
+``M5_LIVE_STEPS=deepseek`` never performs a WeChat draft call.
 
 At-most-once is enforced with ``O_CREAT|O_EXCL`` attempt markers written before
 any outbound request. The script prints one JSON object on the last stdout
@@ -48,6 +55,24 @@ DEEPSEEK_MAX_RESPONSE_BYTES = 64 * 1024
 
 # Indirection so tests can inject a fake transport without touching urllib.
 urlopen = urllib.request.urlopen
+
+# The durable per-run artifact schema. It deliberately omits ``ok`` (a derived
+# convenience flag) and always carries an explicit ``cost`` of ``"unknown"``:
+# the probe never estimates cost.
+DEEPSEEK_ARTIFACT_FIELDS = (
+    "step",
+    "attempted",
+    "request_model_id",
+    "response_model_id",
+    "auth_class",
+    "http_status",
+    "content_non_empty",
+    "elapsed_ms",
+    "usage",
+    "cost",
+    "provider_request_id",
+    "error_class",
+)
 
 DEEPSEEK_RESULT_FIELDS = (
     "step",
@@ -81,6 +106,28 @@ WECHAT_RESULT_FIELDS = (
 def live_enabled(env: dict) -> bool:
     """True only for an explicit ``M5_LIVE_APPROVED=1``."""
     return str(env.get("M5_LIVE_APPROVED", "")) == "1"
+
+
+DEFAULT_LIVE_STEPS = ("deepseek", "wechat")
+
+
+def live_steps(env: dict) -> tuple:
+    """The selected live probes from ``M5_LIVE_STEPS`` (comma list).
+
+    Unset or blank falls back to ``("deepseek", "wechat")`` so existing runs are
+    unchanged. Unknown names are ignored rather than treated as an error.
+    """
+    raw = str(env.get("M5_LIVE_STEPS", "")).strip()
+    if not raw:
+        return DEFAULT_LIVE_STEPS
+    selected = tuple(part.strip() for part in raw.split(",") if part.strip())
+    return selected or DEFAULT_LIVE_STEPS
+
+
+def live_step_enabled(step: str, env: dict) -> bool:
+    """A live step runs only when approved AND explicitly selected."""
+    return live_enabled(env) and step in live_steps(env)
+
 
 
 def _whitelist(result: dict, fields: tuple) -> dict:
@@ -159,11 +206,37 @@ def _deepseek_url(env: dict) -> str:
     return f"{base}/chat/completions" if base else DEEPSEEK_URL_DEFAULT
 
 
-def run_deepseek_step(repo_root: Path, run_id: str, *, transport=None, env=None) -> dict:
-    """One capped DeepSeek chat-completion request. At most once per run id."""
-    repo_root = Path(repo_root)
-    env = os.environ if env is None else env
-    base = _m5_dir(repo_root, run_id) / "deepseek"
+def _write_deepseek_artifact(base: Path, result: dict) -> Path:
+    """Durably persist the redacted per-run DeepSeek result on an ignored path.
+
+    Only whitelisted, provider-issued metadata is written: never the prompt, the
+    full reply, the credential, request headers or a raw error body.
+    """
+    artifact = {
+        "step": "deepseek",
+        "attempted": bool(result.get("attempted")),
+        "request_model_id": result.get("request_model_id"),
+        "response_model_id": result.get("response_model_id"),
+        "auth_class": result.get("auth_class"),
+        "http_status": result.get("http_status"),
+        "content_non_empty": bool(result.get("content_non_empty")),
+        "elapsed_ms": result.get("elapsed_ms"),
+        "usage": result.get("usage", "unknown"),
+        "cost": "unknown",
+        "provider_request_id": result.get("provider_request_id"),
+        "error_class": result.get("error_class"),
+    }
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / "result.json"
+    path.write_text(
+        json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _probe_deepseek(base: Path, repo_root: Path, env: dict, transport) -> dict:
+    """The one-shot probe body; the caller durably records its redacted result."""
     marker = base / "request.attempted"
 
     result = {
@@ -183,7 +256,7 @@ def run_deepseek_step(repo_root: Path, run_id: str, *, transport=None, env=None)
 
     if not _claim_attempt(marker):
         result["error_class"] = "already_attempted"
-        return _whitelist(result, DEEPSEEK_RESULT_FIELDS)
+        return result
     result["attempted"] = True
 
     _load_dotenv(repo_root)
@@ -193,7 +266,7 @@ def run_deepseek_step(repo_root: Path, run_id: str, *, transport=None, env=None)
     if not api_key:
         result["auth_class"] = "not_configured"
         result["error_class"] = "not_configured"
-        return _whitelist(result, DEEPSEEK_RESULT_FIELDS)
+        return result
 
     request = urllib.request.Request(
         _deepseek_url(env),
@@ -218,7 +291,7 @@ def run_deepseek_step(repo_root: Path, run_id: str, *, transport=None, env=None)
         result["http_status"] = http_status
         result["error_class"] = auth_class
         result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
-        return _whitelist(result, DEEPSEEK_RESULT_FIELDS)
+        return result
 
     result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     result["http_status"] = status
@@ -228,10 +301,10 @@ def run_deepseek_step(repo_root: Path, run_id: str, *, transport=None, env=None)
         payload = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         result["error_class"] = "unparseable_response"
-        return _whitelist(result, DEEPSEEK_RESULT_FIELDS)
+        return result
     if not isinstance(payload, dict):
         result["error_class"] = "unexpected_response_shape"
-        return _whitelist(result, DEEPSEEK_RESULT_FIELDS)
+        return result
 
     if isinstance(payload.get("model"), str) and payload["model"]:
         result["response_model_id"] = payload["model"]
@@ -255,9 +328,27 @@ def run_deepseek_step(repo_root: Path, run_id: str, *, transport=None, env=None)
 
     if not result["content_non_empty"]:
         result["error_class"] = "empty_content"
-        return _whitelist(result, DEEPSEEK_RESULT_FIELDS)
+        return result
 
     result["ok"] = True
+    return result
+
+
+def run_deepseek_step(repo_root: Path, run_id: str, *, transport=None, env=None) -> dict:
+    """One capped DeepSeek chat-completion request. At most once per run id."""
+    repo_root = Path(repo_root)
+    env = os.environ if env is None else env
+    base = _m5_dir(repo_root, run_id) / "deepseek"
+
+    result = _probe_deepseek(base, repo_root, env, transport)
+
+    # Write on both success and failure. An ``already_attempted`` re-entry must
+    # not clobber the durable artifact written by the first attempt; it only
+    # writes if, for some reason, no artifact exists yet.
+    artifact_path = base / "result.json"
+    if result.get("error_class") != "already_attempted" or not artifact_path.exists():
+        _write_deepseek_artifact(base, result)
+
     return _whitelist(result, DEEPSEEK_RESULT_FIELDS)
 
 
@@ -442,6 +533,8 @@ def run_step(step: str, repo_root: Path, run_id: str, *, env=None, **kwargs) -> 
     env = os.environ if env is None else env
     if not live_enabled(env):
         return {"step": step, "skipped": True, "reason": "M5_LIVE_APPROVED!=1"}
+    if step not in live_steps(env):
+        return {"step": step, "skipped": True, "reason": f"M5_LIVE_STEPS excludes {step}"}
     if step == "deepseek":
         return run_deepseek_step(repo_root, run_id, env=env, **kwargs)
     if step == "wechat":

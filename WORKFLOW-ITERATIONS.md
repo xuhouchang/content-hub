@@ -174,3 +174,29 @@ M0 + M1 **通过独立复验，无阻断项**。仍需人工处理：VerifyKit a
 ## Round 3 状态（最终）
 
 **M5 代码、测试、文章与证据文档完成；一次真实 DeepSeek 请求成功并留有 provider-issued 请求 ID；一次真实微信草稿因 IP 白名单失败并如实记录，草稿未创建。M5 不宣称全部通过。** 单次提交包含 M5 单元（代码 + 测试 + 文章 + 证据/Known Gap 文档）；`.verifykit/data/` 工件按 gitignore 不提交。下一步需新一次批准（新 run id）并解决微信出口 IP 白名单，才可再次尝试草稿。
+
+## Round 3 — Reviewer（全新 Reviewer）
+
+**结论：1 个阻断证据缺陷（其余全部通过）。** 提交基线 `566e17e`。Reviewer 复核：M5 代码、离线门、一次性预算、密钥/提示/回复 redaction、隔离队列、微信失败如实记录均通过；唯一阻断为**验收证据**问题。
+
+**BLOCKING（原话）**
+
+> One blocking M5 acceptance-evidence defect exists: the approved DeepSeek run did not durably record the required response-model/auth result/request elapsed/token usage (or explicit cost-unknown). The committed evidence explicitly acknowledges this loss. It cannot be reconstructed from the hash-only ledger. Required Closure: Preserve a redacted, ignored per-run DeepSeek result artifact containing request/response model IDs, auth classification, non-empty flag, request-level elapsed milliseconds, usage, and cost: unknown when unavailable. Keep keys, prompts, raw replies, and raw error bodies out. Add an offline test proving that artifact's schema and redaction. Because the previous response values were not retained, meeting this evidence requirement needs a newly approved, separately bounded single DeepSeek request.
+
+**用户决定**：批准**再加一次**有界 DeepSeek 真实请求。
+
+## Round 3 — 修复轮（Executor）
+
+改动范围：仅 `.verifykit/bridge/m5_acceptance.py`、`.verifykit/bridge/pipeline.mjs`、`tests/test_m5_acceptance.py`、`docs/2026-09-28-m5-evidence.md`、`docs/2026-09-28-m5-known-gaps.md`、`WORKFLOW-ITERATIONS.md`。未触碰 M0–M4、`lib/llm.py`、微信步骤真实行为、批准开关与排程。
+
+- **持久化 redacted 工件**：DeepSeek 探针现在在**成功与失败两条路径**都把白名单结果写入 `.verifykit/data/m5/<run-id>/deepseek/result.json`（gitignored）。字段：`step, attempted, request_model_id, response_model_id, auth_class, http_status, content_non_empty, elapsed_ms, usage（数字或 "unknown"）, cost（"unknown"）, provider_request_id, error_class`。绝不含密钥、提示、完整回复、请求头或原始错误体。`already_attempted` 重入不会覆盖首次工件。
+- **新增 `M5_LIVE_STEPS`（逗号列表，默认 `deepseek,wechat`）**：一个 live 步骤仅在 `M5_LIVE_APPROVED=1` 且其名称在 `M5_LIVE_STEPS` 中时运行。未设置时行为完全不变；Node 桥接与 Python 适配器**各自独立**执行同一门控（桥接据此把步骤记为 SKIPPED 并给出 reason）。
+- **离线测试**：`tests/test_m5_acceptance.py` 新增 6 条（成功路径工件 schema/取值、失败路径工件、redaction、重入不覆盖、`M5_LIVE_STEPS` 默认与子集门控）。`pytest -q tests/test_m5_acceptance.py` = **25 passed**；`pytest -q tests` = **196 passed**；`verifykit check` exit 0（47 files，3 rules）；`git diff --check` clean。
+- **第二次批准的真实运行（唯一命令，仅一次，未重试）**：`M5_LIVE_APPROVED=1 M5_LIVE_STEPS=deepseek verifykit run wechat-article-pipeline`。
+  - VerifyKit live Run ID `run_20260930152005_ca786ddb`（Run #15）= FAIL（唯一原因 ground truth 未人工批准）；mock 0、unexpected fallback 0、errors 0、external evidence 1。
+  - `wechat.deepseek_live` EXECUTED/REAL；`wechat.draft_live` **SKIPPED**，reason `M5_LIVE_STEPS excludes wechat` —— **未触发任何微信调用**。
+  - 新的 provider-issued 请求 ID：`fa61d04c-b055-4689-9fd4-c55605d3bd4c`（ledger external evidence 第 2 条）。
+  - 工件 `.verifykit/data/m5/run_20260930152005_ca786ddb/deepseek/result.json` 真实值：`request_model_id=deepseek-flash`、`response_model_id=deepseek-flash`、`auth_class=ok`、`http_status=200`、`content_non_empty=true`、`elapsed_ms=970`、`usage={prompt_tokens:41, completion_tokens:23, total_tokens:64}`、`cost=unknown`、`error_class=null`。
+  - 队列完整性：运行前后 `queue/pending.jsonl` md5 `0900ce0ab0fed4ee2e003a797e760a1a`、11 条不变；真实队列从未交给 worker。
+- **Known Gap 更新**：`docs/2026-09-28-m5-known-gaps.md` 的"DeepSeek 细节数值未落盘"标记为 **RESOLVED**（附新 run id）；微信 IP 白名单等其余 gap 保持 **OPEN**。
+- 交付：单个提交包含代码 + 测试 + 文档；未提交 `.verifykit/data/` 工件。

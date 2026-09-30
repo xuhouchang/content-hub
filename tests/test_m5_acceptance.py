@@ -141,6 +141,130 @@ def test_run_step_skips_without_gate(tmp_path, monkeypatch):
     assert result["skipped"] is True
 
 
+def test_live_steps_defaults_and_override():
+    assert m5.live_steps({}) == ("deepseek", "wechat")
+    assert m5.live_steps({"M5_LIVE_STEPS": ""}) == ("deepseek", "wechat")
+    assert m5.live_steps({"M5_LIVE_STEPS": "wechat"}) == ("wechat",)
+    assert m5.live_steps({"M5_LIVE_STEPS": " deepseek , wechat "}) == ("deepseek", "wechat")
+    # An all-blank list falls back to the default rather than disabling both.
+    assert m5.live_steps({"M5_LIVE_STEPS": " , "}) == ("deepseek", "wechat")
+
+
+def test_run_step_respects_live_steps_subset(tmp_path, monkeypatch):
+    """An approved run selects probes by name; an unselected probe never runs."""
+
+    def _explode(*_args, **_kwargs):
+        raise AssertionError("an unselected live step must not run")
+
+    monkeypatch.setattr(m5, "urlopen", _explode)
+    monkeypatch.setattr(m5, "run_wechat_step", _explode)
+    env = {"M5_LIVE_APPROVED": "1", "M5_LIVE_STEPS": "deepseek"}
+
+    assert m5.live_step_enabled("deepseek", env) is True
+    assert m5.live_step_enabled("wechat", env) is False
+
+    wechat = m5.run_step("wechat", tmp_path, "run-subset", env=env)
+    assert wechat == {"step": "wechat", "skipped": True, "reason": "M5_LIVE_STEPS excludes wechat"}
+
+    # Unset keeps both probes selected (default behavior unchanged).
+    default_env = {"M5_LIVE_APPROVED": "1"}
+    assert m5.live_step_enabled("deepseek", default_env) is True
+    assert m5.live_step_enabled("wechat", default_env) is True
+
+
+# ── DeepSeek durable artifact ─────────────────────────────────────────────
+
+
+def _artifact_path(tmp_path: Path, run_id: str) -> Path:
+    return tmp_path / ".verifykit" / "data" / "m5" / run_id / "deepseek" / "result.json"
+
+
+def test_deepseek_writes_redacted_artifact_on_success(tmp_path, deepseek_key):
+    transport = _transport(_deepseek_body(_ok_payload()))
+    m5.run_deepseek_step(tmp_path, "run-artifact-ok", transport=transport)
+
+    path = _artifact_path(tmp_path, "run-artifact-ok")
+    assert path.exists()
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+
+    assert set(artifact) == set(m5.DEEPSEEK_ARTIFACT_FIELDS)
+    assert "ok" not in artifact
+    assert artifact == {
+        "step": "deepseek",
+        "attempted": True,
+        "request_model_id": "deepseek-flash",
+        "response_model_id": "deepseek-chat",
+        "auth_class": "ok",
+        "http_status": 200,
+        "content_non_empty": True,
+        "elapsed_ms": artifact["elapsed_ms"],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 2, "total_tokens": 13},
+        "cost": "unknown",
+        "provider_request_id": "chatcmpl-provider-1",
+        "error_class": None,
+    }
+    assert isinstance(artifact["elapsed_ms"], int) and artifact["elapsed_ms"] >= 0
+
+
+def test_deepseek_writes_artifact_on_failure(tmp_path, deepseek_key):
+    calls = []
+
+    def _open(request, timeout=None):
+        calls.append(request)
+        raise TimeoutError("timed out")
+
+    result = m5.run_deepseek_step(tmp_path, "run-artifact-timeout", transport=_open)
+    assert result["error_class"] == "timeout"
+    assert len(calls) == 1
+
+    artifact = json.loads(_artifact_path(tmp_path, "run-artifact-timeout").read_text(encoding="utf-8"))
+    assert set(artifact) == set(m5.DEEPSEEK_ARTIFACT_FIELDS)
+    assert artifact["attempted"] is True
+    assert artifact["auth_class"] == "timeout"
+    assert artifact["http_status"] is None
+    assert artifact["content_non_empty"] is False
+    assert artifact["usage"] == "unknown"
+    assert artifact["cost"] == "unknown"
+    assert artifact["provider_request_id"] is None
+    assert artifact["error_class"] == "timeout"
+
+
+def test_deepseek_artifact_is_redacted(tmp_path, monkeypatch):
+    secret = "sk-artifact-super-secret"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
+
+    def _open(request, timeout=None):
+        raise urllib.error.HTTPError(
+            "https://api.deepseek.com/chat/completions",
+            500,
+            "Server Error",
+            {},
+            io.BytesIO(b'{"error":{"message":"raw provider error body"}}'),
+        )
+
+    m5.run_deepseek_step(tmp_path, "run-artifact-redact", transport=_open)
+    blob = _artifact_path(tmp_path, "run-artifact-redact").read_text(encoding="utf-8")
+
+    assert secret not in blob
+    assert m5.DEEPSEEK_PROMPT not in blob
+    assert "raw provider error body" not in blob
+    assert "Authorization" not in blob
+    assert "Bearer" not in blob
+    assert "messages" not in blob
+
+
+def test_deepseek_artifact_not_clobbered_by_a_second_attempt(tmp_path, deepseek_key):
+    first_transport = _transport(_deepseek_body(_ok_payload()))
+    m5.run_deepseek_step(tmp_path, "run-artifact-once", transport=first_transport)
+    before = _artifact_path(tmp_path, "run-artifact-once").read_text(encoding="utf-8")
+
+    second_transport = _transport(_deepseek_body(_ok_payload(model="deepseek-reasoner", id="chatcmpl-2")))
+    second = m5.run_deepseek_step(tmp_path, "run-artifact-once", transport=second_transport)
+    assert second["error_class"] == "already_attempted"
+    assert len(second_transport.calls) == 0
+    assert _artifact_path(tmp_path, "run-artifact-once").read_text(encoding="utf-8") == before
+
+
 def test_cli_runs_standalone_and_stays_offline(tmp_path):
     """The adapter must be importable as a standalone script (repo root on path).
 

@@ -7,9 +7,10 @@
  * workspace, and records each executed step with `kit.step()`.
  *
  * M0 steps are offline and deterministic. M5 adds two live probes that are
- * DEFAULT OFF and only run when M5_LIVE_APPROVED=1: one capped DeepSeek request
- * and one WeChat draft creation against an isolated queue. Without that gate,
- * pytest, `verifykit check` and `verifykit run` never touch the network. A local
+ * DEFAULT OFF and only run when M5_LIVE_APPROVED=1 (and named in M5_LIVE_STEPS,
+ * default "deepseek,wechat"): one capped DeepSeek request and one WeChat draft
+ * creation against an isolated queue. Without that gate, pytest,
+ * `verifykit check` and `verifykit run` never touch the network. A local
  * step is never reported as third-party evidence; a provider-issued request id
  * is recorded via kit.external() only when the provider actually returned one.
  */
@@ -28,7 +29,25 @@ const DATE = process.env.VERIFYKIT_DATE || "2026-09-28";
 
 // Default OFF. Only an explicit M5_LIVE_APPROVED=1 enables any outbound call.
 const M5_LIVE_APPROVED = process.env.M5_LIVE_APPROVED === "1";
+// Selected live probes (comma list). Default "deepseek,wechat" keeps existing
+// behavior; an unset env changes nothing.
+const M5_LIVE_STEPS = new Set(
+  (process.env.M5_LIVE_STEPS || "deepseek,wechat")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean),
+);
 const M5_TIMEOUT_MS = { deepseek: 35000, wechat: 120000 };
+
+function liveStepEnabled(name) {
+  return M5_LIVE_APPROVED && M5_LIVE_STEPS.has(name);
+}
+
+function liveSkipReason(name) {
+  if (!M5_LIVE_APPROVED) return "M5_LIVE_APPROVED!=1";
+  return `M5_LIVE_STEPS excludes ${name}`;
+}
+
 
 function runPythonStep(step, workspace) {
   return new Promise((resolvePromise, rejectPromise) => {
@@ -156,8 +175,8 @@ export async function runPipeline(ctx) {
       "wechat.deepseek_live",
       {
         required: false,
-        enabled: M5_LIVE_APPROVED,
-        skipReason: "M5_LIVE_APPROVED!=1",
+        enabled: liveStepEnabled("deepseek"),
+        skipReason: liveSkipReason("deepseek"),
         input: { date: DATE, max_tokens: 128, attempts: 1 },
       },
       async () => {
@@ -187,8 +206,8 @@ export async function runPipeline(ctx) {
       "wechat.draft_live",
       {
         required: false,
-        enabled: M5_LIVE_APPROVED,
-        skipReason: "M5_LIVE_APPROVED!=1",
+        enabled: liveStepEnabled("wechat"),
+        skipReason: liveSkipReason("wechat"),
         input: { article: "docs/acceptance/m5-test-article.md", publish: false },
       },
       async () => {
