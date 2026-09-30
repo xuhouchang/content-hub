@@ -216,3 +216,13 @@ M0 + M1 **通过独立复验，无阻断项**。仍需人工处理：VerifyKit a
 **验证**：`pytest -q tests/test_m1_final_draft.py` = 11 passed；`pytest -q tests` = 197 passed；`verifykit check` exit 1（6 个 `no-unified-fallback-bypass` 静态策略错误，全部**既有**——已 stash 对比 HEAD 得到完全相同的 6 条，本次未新增、不在范围）；`ruff check write_article.py tests/test_m1_final_draft.py` = 50 个**既有**错误（与 HEAD 逐条一致，未新增）；`git diff --check` exit 0。
 
 **提交**：单一提交（代码 + 测试 + 本日志），message 为 `refactor(m1): drop semantic-review budget from final-draft acceptance`。
+
+## Round 5 — 修复轮（Executor）：tag-schema 静默回退改为 fail-safe
+
+Reviewer 复核提交 `493c480` 的批准标记，判定 `content_platform/runtime.py` 的 tag-schema 回退为 **BLOCKING**：`tag_schema.py` 是本仓库源码，`except Exception` 却吞掉任何导入/初始化错误，只把 sentinel 字符串塞进 LLM prompt——既不暴露为 job state 或操作员可见的失败，返回的 tags 也未经校验，可能静默写入伪造/非法标签；标记错误地为真实静默回退背书。
+
+**改动**（仅 `content_platform/runtime.py::_build_tag_definitions`）：删除 `except Exception: return "(tag definitions unavailable)"` 的静默 sentinel 分支，保留仓库根的 `sys.path` 设置，改为 `except ImportError as error: raise RuntimeError("tag_schema is required but could not be imported") from error`（显式 re-raise，属策略认可形式；非 ImportError 的意外错误如 SyntaxError 直接上抛）。同步删除该处已无对应回退的 `verifykit-allow` 标记。tag_schema 缺失或损坏时 tag 步骤**可见失败**，不再持久化任何未校验标签。
+
+**范围**：未触碰 `lib/llm.py`、时间守卫、队列/worker、批准开关、排程、M0–M5 验收代码；其余 5 个 `verifykit-allow` 标记原样保留，未增删任何其他标记。
+
+**验证**：`verifykit check` exit 0（静态策略 PASS，因 sentinel 回退及其标记一并移除，原有 6 个 `no-unified-fallback-bypass` 错误中 1 个消除）；`grep -rn "verifykit-allow: no-unified-fallback-bypass" . --include='*.py'` = 5；`pytest -q tests` = 197 passed；`ruff check content_platform/runtime.py` 未新增错误；`git diff --check` clean。单提交，message 为 `fix: make tag-schema import fail-safe instead of silent sentinel`。

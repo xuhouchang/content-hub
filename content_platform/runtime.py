@@ -57,13 +57,11 @@ def _save_tag_db(tags: dict) -> None:
 
 def _build_tag_definitions() -> str:
     """Build compact dimension definitions for the LLM prompt."""
+    sys.path.insert(0, str(_TAG_FILE.parent.parent))
     try:
-        sys.path.insert(0, str(_TAG_FILE.parent.parent))
         from tag_schema import TAG_SCHEMA
-    # verifykit-allow: no-unified-fallback-bypass optional tag_schema import degrades to a visible sentinel
-    except Exception:
-        # Inline fallback if tag_schema not available
-        return "(tag definitions unavailable)"
+    except ImportError as error:
+        raise RuntimeError("tag_schema is required but could not be imported") from error
     lines = []
     for dim in _TAG_DIMENSIONS:
         info = TAG_SCHEMA.get(dim, {})
