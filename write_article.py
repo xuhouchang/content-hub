@@ -811,48 +811,6 @@ def check_final_traceability(article_text: str, source_map: list | None) -> dict
     }
 
 
-def _quality_review_budget_state(workspace_dir: Path) -> Path:
-    return Path(workspace_dir) / "platform" / "state" / "quality_judge_budget.json"
-
-
-def consume_quality_review_budget(workspace_dir: Path, date_str: str) -> bool:
-    """Return True when one semantic review is still available for the date.
-
-    At most one review per final article (enforced by the single call site) and
-    at most ``QUALITY_LLM_JUDGE_DAILY_BUDGET`` (default 2) per daily target.
-    """
-    try:
-        budget = max(1, int(os.environ.get("QUALITY_LLM_JUDGE_DAILY_BUDGET", "2")))
-    except ValueError:
-        budget = 2
-    state_file = _quality_review_budget_state(workspace_dir)
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = state_file.with_suffix(".lock")
-    import fcntl
-
-    with lock_path.open("a+") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            try:
-                payload = json.loads(state_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                payload = {}
-            if not isinstance(payload, dict):
-                payload = {}
-            used = payload.get(date_str, 0)
-            if not isinstance(used, int):
-                used = 0
-            if used >= budget:
-                return False
-            payload[date_str] = used + 1
-            temp = state_file.with_suffix(".json.tmp")
-            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            temp.replace(state_file)
-            return True
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-
-
 def evaluate_final_draft(
     article_text: str,
     *,
@@ -865,10 +823,10 @@ def evaluate_final_draft(
     """Acceptance for the cleaned, saved FINAL draft.
 
     = rule gate + in-article source traceability + opt-in semantic review.
-    Semantic review is opt-in via ``QUALITY_LLM_JUDGE=1``; when enabled, at most
-    one review runs per final article and the daily budget is enforced. If it is
-    enabled but unavailable (or the budget is exhausted) the draft is rejected
-    with an explicit reason — never silently passed.
+    Semantic review is opt-in via ``QUALITY_LLM_JUDGE=1`` and runs on every
+    final draft (no daily cap). If it is enabled but unavailable (the judge
+    module cannot be imported or returns the rule-only status) the draft is
+    rejected with an explicit reason — never silently passed.
     """
     judge_enabled = os.environ.get("QUALITY_LLM_JUDGE", "").strip().lower() in (
         "1",
@@ -876,14 +834,13 @@ def evaluate_final_draft(
         "yes",
         "on",
     )
-    workspace = Path(workspace_dir) if workspace_dir else WORKSPACE_DIR
 
     quality = evaluate_article_quality(
         article_text,
         title=title,
         source_map=source_map,
         blueprint_text=blueprint_text,
-        enable_llm_judge=judge_enabled and consume_quality_review_budget(workspace, date_str),
+        enable_llm_judge=judge_enabled,
     )
     traceability = check_final_traceability(article_text, source_map)
     quality["traceability"] = traceability
@@ -892,12 +849,13 @@ def evaluate_final_draft(
         quality.setdefault("reasons", []).append(traceability["reason"])
 
     if judge_enabled and quality.get("status") == "rules":
-        # The judge was requested but no review ran (no budget left). Reject
+        # The judge was requested but no semantic review actually ran (judge
+        # module unavailable, so only the rule layer executed). Reject
         # explicitly instead of passing on the rule layer alone.
         quality["passed"] = False
         quality["status"] = "unavailable"
-        quality.setdefault("reasons", []).append("语义复核已启用但当日预算已用尽，终稿按未通过处理")
-        quality.setdefault("warnings", []).append("semantic review skipped: daily budget exhausted")
+        quality.setdefault("reasons", []).append("语义复核已启用但未能执行（语义评估模块不可用），终稿按未通过处理")
+        quality.setdefault("warnings", []).append("semantic review did not run: judge module unavailable")
     return quality
 
 

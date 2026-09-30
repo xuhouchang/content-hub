@@ -200,3 +200,19 @@ M0 + M1 **通过独立复验，无阻断项**。仍需人工处理：VerifyKit a
   - 队列完整性：运行前后 `queue/pending.jsonl` md5 `0900ce0ab0fed4ee2e003a797e760a1a`、11 条不变；真实队列从未交给 worker。
 - **Known Gap 更新**：`docs/2026-09-28-m5-known-gaps.md` 的"DeepSeek 细节数值未落盘"标记为 **RESOLVED**（附新 run id）；微信 IP 白名单等其余 gap 保持 **OPEN**。
 - 交付：单个提交包含代码 + 测试 + 文档；未提交 `.verifykit/data/` 工件。
+
+## Round 4 — Executor（移除写作链路的"预算"概念）
+
+用户要求：写文章时不需要考虑"预算"，把消费/调用预算概念从写作链路移除，其余行为不变。
+
+**移除内容**（`write_article.py`）：删除 `_quality_review_budget_state()` 与 `consume_quality_review_budget()`；删除全部 `QUALITY_LLM_JUDGE_DAILY_BUDGET` 引用及 `platform/state/quality_judge_budget.json` 状态文件读写。`evaluate_final_draft()` 现在只要 `QUALITY_LLM_JUDGE` 为真值（1/true/yes/on）就对**每一份**终稿执行语义复核，无每日上限、不消耗任何预算、不再写预算状态文件。
+
+**保留的安全保证**：语义复核被请求但**未真正执行**（`lib.quality_judge` 不可导入，`evaluate_article_quality` 回落到 `status="rules"`）时，终稿仍**显式拒绝**（`passed=False`、`status="unavailable"`），只是把措辞从"当日预算已用尽"改为"语义评估模块不可用"。绝不因移除预算而静默放行。
+
+**为什么保留墙钟时间守卫**：被移除的是"花钱/调用次数"预算，与 `LLM_DEADLINE` / `IMAGE_SEARCH_DEADLINE` / 840s / 900s 这类**单次运行的墙钟上限**不是同一概念。时间守卫防止单次运行卡死，不限制写几篇，与"写文章不用考虑预算"的诉求无关，故保持不动（同样未触碰 image-search 时间守卫、topic_planner `scan_limit`、发布队列/worker、M0–M5、批准开关与排程）。
+
+**测试**（`tests/test_m1_final_draft.py`）：移除 `test_semantic_review_daily_budget` 及对 `consume_quality_review_budget` 的断言；新增 `test_semantic_review_has_no_daily_cap`（同日同 workspace 连写 3 篇终稿，mock judge 每次都被调用，且不生成预算状态文件）与 `test_semantic_review_enabled_but_module_unavailable_rejects`（judge 模块不可导入仍显式拒绝）；`test_semantic_review_enabled_but_unavailable_rejects` 保持通过。
+
+**验证**：`pytest -q tests/test_m1_final_draft.py` = 11 passed；`pytest -q tests` = 197 passed；`verifykit check` exit 1（6 个 `no-unified-fallback-bypass` 静态策略错误，全部**既有**——已 stash 对比 HEAD 得到完全相同的 6 条，本次未新增、不在范围）；`ruff check write_article.py tests/test_m1_final_draft.py` = 50 个**既有**错误（与 HEAD 逐条一致，未新增）；`git diff --check` exit 0。
+
+**提交**：单一提交（代码 + 测试 + 本日志），message 为 `refactor(m1): drop semantic-review budget from final-draft acceptance`。

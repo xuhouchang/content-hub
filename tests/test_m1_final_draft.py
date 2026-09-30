@@ -8,7 +8,7 @@ Four required scenarios (all offline, no network, no live writes):
 3. quality drop    -> final rejection; no topic/URL record, no queue entry.
 4. queue failure   -> commit recorded incomplete, never reported successful.
 
-Plus the semantic-review opt-in and daily review budget.
+Plus the semantic-review opt-in (no daily cap).
 """
 
 import json
@@ -203,10 +203,54 @@ def test_semantic_review_enabled_but_unavailable_rejects(tmp_path: Path, monkeyp
     assert quality["status"] == "unavailable"
 
 
-def test_semantic_review_daily_budget(tmp_path: Path):
-    assert wa.consume_quality_review_budget(tmp_path, "2026-09-28") is True
-    assert wa.consume_quality_review_budget(tmp_path, "2026-09-28") is True
-    assert wa.consume_quality_review_budget(tmp_path, "2026-09-28") is False
+def test_semantic_review_has_no_daily_cap(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("QUALITY_LLM_JUDGE", "1")
+    calls: list[str] = []
+
+    def _pass(*args, **kwargs):
+        calls.append(args[0] if args else "")
+        return {
+            "passed": True, "status": "rules+llm", "score": 8, "checks": {},
+            "reasons": [], "warnings": [], "llm": {"verdict": "pass"}, "rules": {},
+        }
+
+    monkeypatch.setattr("lib.quality_judge.evaluate_quality", _pass)
+
+    # More drafts in the same day/workspace than the old daily budget (2):
+    # every one must still get a semantic review.
+    for _ in range(3):
+        quality = wa.evaluate_final_draft(
+            GOOD_FINAL, title="组织跟不上才是AI落地的真正瓶颈",
+            source_map=SOURCE_MAP, date_str="2026-09-28", workspace_dir=tmp_path,
+        )
+        assert quality["passed"] is True, quality
+
+    assert len(calls) == 3  # judge ran for each draft; no daily cap
+    # No budget/state file is created anywhere under the workspace.
+    assert not list(tmp_path.rglob("quality_judge_budget*"))
+
+
+def test_semantic_review_enabled_but_module_unavailable_rejects(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("QUALITY_LLM_JUDGE", "1")
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _fake_import(name, *args, **kwargs):
+        if name == "lib.quality_judge":
+            raise ImportError("judge module unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    quality = wa.evaluate_final_draft(
+        GOOD_FINAL, title="组织跟不上才是AI落地的真正瓶颈",
+        source_map=SOURCE_MAP, date_str="2026-09-28", workspace_dir=tmp_path,
+    )
+    assert quality["passed"] is False
+    assert quality["status"] == "unavailable"
+    assert any("未能执行" in reason for reason in quality["reasons"])
 
 
 def test_article_id_is_stable_and_normalized(tmp_path: Path):
