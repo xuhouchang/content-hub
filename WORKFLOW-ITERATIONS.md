@@ -31,7 +31,7 @@ Executor 报告要点（详见其最终报告）：
 
 - **M0**：新增 `content_platform/audit/funnel.py` 与 `docs/2026-09-28-baseline-funnel.md`（采集→评分→候选→选中→合格→入队→草稿漏斗，含原始证据路径与显式 `unknown`，并分类 material_shortage / model_failure / quality_rejection / enqueue_failure / wechat_failure）；新增 `tests/conftest.py` 全局隔离；修复 8 个既有失败/联网测试；新增 `tests/platform/test_funnel.py`（5 条）；引入 VerifyKit（`.verifykit/`，acceptance 与 ground-truth 均 `approved:false`，Node ESM 桥接 Python）；重写 CI 模板为 Python；`requirements.txt` 增补 `Pillow`。
 - **M0 缺陷与修复**：既有测试 `test_legacy_writer_isolation` 等会写入**真实** `queue/pending.jsonl`（11→19 条）及 `wechat-articles/`、`platform/state/`。修复方式为 `tests/conftest.py` autouse 把 live 路径重定向到 per-test 临时目录，并桩掉 LLM 标注/评分边界（未在生产代码加测试分支）。队列已恢复为原始 11 条（备份 `/tmp/content-hub-queue-pending-polluted-20260928.bak`）。
-- **M1**：润色纳入写作流程（非零退出/超时/缺脚本/缺终稿 ⇒ 写作失败，保留草稿与 `polish_error.txt`）；质量与"正文内可定位来源"检查改在**终稿** `article.md` 上执行（仅元数据里有 URL 不再算通过）；`QUALITY_LLM_JUDGE=1` 为可选语义复核并设每日预算，启用但不可用 ⇒ 显式拒绝；`derive_article_id` 稳定 ID；`commit_final_article` 使主题/已用 URL/入队三写入幂等可重试并记录每步状态，未完成 ⇒ 退出码 3（绝不算成功）；`enqueue_for_publish` 跨 pending/processing/done/failed 按 ID 去重。
+- **M1**：润色纳入写作流程（非零退出/超时/缺脚本/缺终稿 ⇒ 写作失败，保留草稿与 `polish_error.txt`）；质量与"正文内可定位来源"检查改在**终稿** `article.md` 上执行（仅元数据里有 URL 不再算通过）；`QUALITY_LLM_JUDGE=1` 为可选语义复核并设每日预算（该每日预算已于 Round 4 移除，见下），启用但不可用 ⇒ 显式拒绝；`derive_article_id` 稳定 ID；`commit_final_article` 使主题/已用 URL/入队三写入幂等可重试并记录每步状态，未完成 ⇒ 退出码 3（绝不算成功）；`enqueue_for_publish` 跨 pending/processing/done/failed 按 ID 去重。
 - **测试**：全套 `pytest -q tests` = 131 passed；计划指定的两条命令 = 37 / 90 passed；M1 四类离线场景 = 10 passed。
 - **ruff**：计划指定文件 = 99 个**既有**错误（历史风格债），新增文件干净。
 - **VerifyKit**：`check` exit 0；Golden Path `wechat-article-pipeline` Run ID `run_20260928090949_174ef423`，结果 FAIL（exit 1），各步 EXECUTED/REAL，mock 0，失败原因为 ground truth 未人工批准（符合"未批准不得变绿"要求）。
@@ -205,13 +205,13 @@ M0 + M1 **通过独立复验，无阻断项**。仍需人工处理：VerifyKit a
 
 用户要求：写文章时不需要考虑"预算"，把消费/调用预算概念从写作链路移除，其余行为不变。
 
-**移除内容**（`write_article.py`）：删除 `_quality_review_budget_state()` 与 `consume_quality_review_budget()`；删除全部 `QUALITY_LLM_JUDGE_DAILY_BUDGET` 引用及 `platform/state/quality_judge_budget.json` 状态文件读写。`evaluate_final_draft()` 现在只要 `QUALITY_LLM_JUDGE` 为真值（1/true/yes/on）就对**每一份**终稿执行语义复核，无每日上限、不消耗任何预算、不再写预算状态文件。
+**移除内容**（`write_article.py`）：删除语义复核的"消费/调用预算"实现——包括每日预算的环境变量读取、预算消耗函数，以及预算状态文件的读写。`evaluate_final_draft()` 现在只要 `QUALITY_LLM_JUDGE` 为真值（1/true/yes/on）就对**每一份**终稿执行语义复核，无每日上限、不消耗任何预算、不再写预算状态文件。
 
 **保留的安全保证**：语义复核被请求但**未真正执行**（`lib.quality_judge` 不可导入，`evaluate_article_quality` 回落到 `status="rules"`）时，终稿仍**显式拒绝**（`passed=False`、`status="unavailable"`），只是把措辞从"当日预算已用尽"改为"语义评估模块不可用"。绝不因移除预算而静默放行。
 
 **为什么保留墙钟时间守卫**：被移除的是"花钱/调用次数"预算，与 `LLM_DEADLINE` / `IMAGE_SEARCH_DEADLINE` / 840s / 900s 这类**单次运行的墙钟上限**不是同一概念。时间守卫防止单次运行卡死，不限制写几篇，与"写文章不用考虑预算"的诉求无关，故保持不动（同样未触碰 image-search 时间守卫、topic_planner `scan_limit`、发布队列/worker、M0–M5、批准开关与排程）。
 
-**测试**（`tests/test_m1_final_draft.py`）：移除 `test_semantic_review_daily_budget` 及对 `consume_quality_review_budget` 的断言；新增 `test_semantic_review_has_no_daily_cap`（同日同 workspace 连写 3 篇终稿，mock judge 每次都被调用，且不生成预算状态文件）与 `test_semantic_review_enabled_but_module_unavailable_rejects`（judge 模块不可导入仍显式拒绝）；`test_semantic_review_enabled_but_unavailable_rejects` 保持通过。
+**测试**（`tests/test_m1_final_draft.py`）：移除旧的每日预算测试及对预算消耗函数的断言；新增 `test_semantic_review_has_no_daily_cap`（同日同 workspace 连写 3 篇终稿，mock judge 每次都被调用，且不生成预算状态文件）与 `test_semantic_review_enabled_but_module_unavailable_rejects`（judge 模块不可导入仍显式拒绝）；`test_semantic_review_enabled_but_unavailable_rejects` 保持通过。
 
 **验证**：`pytest -q tests/test_m1_final_draft.py` = 11 passed；`pytest -q tests` = 197 passed；`verifykit check` exit 1（6 个 `no-unified-fallback-bypass` 静态策略错误，全部**既有**——已 stash 对比 HEAD 得到完全相同的 6 条，本次未新增、不在范围）；`ruff check write_article.py tests/test_m1_final_draft.py` = 50 个**既有**错误（与 HEAD 逐条一致，未新增）；`git diff --check` exit 0。
 

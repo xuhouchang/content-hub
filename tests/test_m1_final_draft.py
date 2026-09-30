@@ -216,6 +216,8 @@ def test_semantic_review_has_no_daily_cap(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("lib.quality_judge.evaluate_quality", _pass)
 
+    before = sorted(tmp_path.rglob("*"))
+
     # More drafts in the same day/workspace than the old daily budget (2):
     # every one must still get a semantic review.
     for _ in range(3):
@@ -226,8 +228,9 @@ def test_semantic_review_has_no_daily_cap(tmp_path: Path, monkeypatch):
         assert quality["passed"] is True, quality
 
     assert len(calls) == 3  # judge ran for each draft; no daily cap
-    # No budget/state file is created anywhere under the workspace.
-    assert not list(tmp_path.rglob("quality_judge_budget*"))
+    # The acceptance path is side-effect free: it creates no budget/state
+    # file anywhere under the workspace.
+    assert sorted(tmp_path.rglob("*")) == before
 
 
 def test_semantic_review_enabled_but_module_unavailable_rejects(tmp_path: Path, monkeypatch):
